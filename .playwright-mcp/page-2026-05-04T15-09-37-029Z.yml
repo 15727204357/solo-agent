@@ -1,0 +1,78 @@
+- generic [ref=e2]:
+  - complementary "Sessions" [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]: SA
+      - generic [ref=e6]:
+        - heading "Solo Agent" [level=1] [ref=e7]
+        - paragraph [ref=e8]: development
+    - generic [ref=e11]: solo-agent-web ready
+    - generic [ref=e12]:
+      - generic [ref=e13]:
+        - heading "Sessions" [level=2] [ref=e14]
+        - generic [ref=e15]: "1"
+      - list [ref=e16]:
+        - listitem [ref=e17]:
+          - strong [ref=e18]: "1"
+          - generic [ref=e19]: f11a8c83-7ac3-4aa4-ab40-4c10028cef88
+  - main [ref=e20]:
+    - generic [ref=e21]:
+      - generic [ref=e22]:
+        - paragraph [ref=e23]: Agent run console
+        - heading "Transparent coding assistant runtime" [level=2] [ref=e24]
+      - generic [ref=e25]:
+        - generic [ref=e26]: Idle
+        - text: No run selected
+    - region "New Run" [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e29]:
+          - heading "New Run" [level=2] [ref=e30]
+          - paragraph [ref=e31]: Create a session and stream the agent process.
+        - button "Clear" [ref=e32] [cursor=pointer]
+      - generic [ref=e33]:
+        - generic [ref=e34]:
+          - generic [ref=e35]: Session title
+          - textbox "Session title" [ref=e36]:
+            - /placeholder: Explore the project architecture
+        - generic [ref=e37]:
+          - generic [ref=e38]: Prompt
+          - textbox "Prompt" [ref=e39]:
+            - /placeholder: Describe the coding task for Solo Agent...
+        - generic [ref=e40]:
+          - button "Start Run" [ref=e41] [cursor=pointer]
+          - status
+    - region "Run details" [ref=e42]:
+      - article [ref=e43]:
+        - generic [ref=e44]:
+          - generic [ref=e45]:
+            - paragraph [ref=e46]: Assistant
+            - heading "Final Response" [level=2] [ref=e47]
+          - generic [ref=e48]: Waiting
+        - generic [ref=e49]: The agent response will stream here.
+      - article [ref=e50]:
+        - generic [ref=e51]:
+          - generic [ref=e52]:
+            - paragraph [ref=e53]: Planner
+            - heading "Plan" [level=2] [ref=e54]
+          - generic [ref=e55]: 0 chars
+        - generic [ref=e56]: The plan will appear before tool calls.
+      - article [ref=e57]:
+        - generic [ref=e58]:
+          - generic [ref=e59]:
+            - paragraph [ref=e60]: Context
+            - heading "Tool Calls" [level=2] [ref=e61]
+          - generic [ref=e62]: 0 tools
+        - list [ref=e63]
+      - article [ref=e64]:
+        - generic [ref=e65]:
+          - generic [ref=e66]:
+            - paragraph [ref=e67]: Observability
+            - heading "Event Timeline" [level=2] [ref=e68]
+          - generic [ref=e69]: 0 events
+        - list [ref=e70]
+    - region "Latest Payload" [ref=e71]:
+      - generic [ref=e72]:
+        - generic [ref=e73]:
+          - paragraph [ref=e74]: Debug
+          - heading "Latest Payload" [level=2] [ref=e75]
+        - generic [ref=e76]: None
+      - generic [ref=e77]: "{}"

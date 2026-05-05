@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_name }}</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+    <script src="{{ url_for('static', path='app.js') }}" defer></script>
+  </head>
+  <body data-environment="{{ environment }}">
+    <div class="app-shell">
+      <aside class="left-rail" aria-label="项目与会话">
+        <header class="brand">
+          <div class="brand-mark" aria-hidden="true">SA</div>
+          <div>
+            <h1>Solo Agent</h1>
+            <p>{{ environment }} 本地运行时</p>
+          </div>
+        </header>
+
+        <button id="new-session" class="primary-button" type="button">新建会话</button>
+
+        <div class="health-card">
+          <span id="health-dot" class="status-dot status-idle" aria-hidden="true"></span>
+          <span id="health-text">正在检查服务</span>
+        </div>
+
+        <section class="workspace-picker" aria-labelledby="workspace-title">
+          <div class="section-title">
+            <h2 id="workspace-title">当前项目</h2>
+          </div>
+          <label>
+            <span>本地路径</span>
+            <input id="workspace-path" name="workspace_path" type="text" placeholder="C:\CodeProject\learning\solo-agent">
+          </label>
+          <div class="workspace-actions">
+            <button id="folder-picker" class="secondary-button" type="button">选择目录</button>
+            <span id="folder-hint">浏览器支持时可辅助预览。</span>
+          </div>
+        </section>
+
+        <section class="rail-section" aria-labelledby="workspaces-title">
+          <div class="section-title">
+            <h2 id="workspaces-title">最近工作区</h2>
+            <span id="workspace-count">0</span>
+          </div>
+          <div id="workspace-list" class="workspace-list" aria-live="polite"></div>
+        </section>
+      </aside>
+
+      <main class="thread-pane">
+        <header class="thread-header">
+          <div>
+            <p class="overline">编码会话</p>
+            <h2 id="thread-title">新的编码会话</h2>
+            <p id="thread-subtitle">选择历史会话，或输入任务开始一次新的 Agent 运行。</p>
+          </div>
+          <div class="run-meta" aria-live="polite">
+            <span id="run-status" class="status-pill status-idle">空闲</span>
+            <span id="current-run">尚未运行</span>
+          </div>
+        </header>
+
+        <section id="thread-body" class="thread-body" aria-label="多轮会话线程" aria-live="polite">
+          <article class="empty-thread">
+            <h3>开始一次真实的项目问询</h3>
+            <p>输入项目路径、会话标题和任务描述。运行后，助手回复会在这里流式输出，右侧只显示必要链路状态。</p>
+          </article>
+        </section>
+
+        <section class="composer-dock" aria-labelledby="composer-title">
+          <div class="composer-heading">
+            <div>
+              <h2 id="composer-title">对话</h2>
+              <p id="form-message" role="status">选择历史会话后可继续追问；新会话可先取一个标题。</p>
+            </div>
+            <span id="composer-mode" class="mode-pill">新会话</span>
+          </div>
+
+          <form id="session-form" class="prompt-form">
+            <label id="title-field" class="title-field">
+              <span>会话标题</span>
+              <input name="title" type="text" placeholder="例如：梳理 Agent 项目结构" maxlength="120">
+            </label>
+            <label class="prompt-field">
+              <span>消息</span>
+              <textarea
+                name="prompt"
+                rows="5"
+                placeholder="输入你的问题，按发送后 Agent 会在当前会话中回复..."
+                maxlength="8000"
+              ></textarea>
+            </label>
+            <div class="form-actions">
+              <button id="start-run" class="primary-button" type="submit">发送消息</button>
+              <button id="clear-thread" class="secondary-button" type="button">清空当前视图</button>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <aside class="monitor-pane" aria-label="Agent 后台监控">
+        <header class="monitor-header">
+          <p class="overline">后台监控</p>
+          <h2>Agent 链路</h2>
+          <p>默认只展示阶段级信号，模型 chunk 保留在调试详情里。</p>
+        </header>
+
+        <section class="monitor-section" aria-labelledby="pipeline-title">
+          <div class="section-title">
+            <h3 id="pipeline-title">执行阶段</h3>
+            <span id="pipeline-state">等待</span>
+          </div>
+          <ol id="pipeline" class="pipeline">
+            <li data-stage="received"><span>接收任务</span><em>等待</em></li>
+            <li data-stage="plan"><span>规划</span><em>等待</em></li>
+            <li data-stage="context"><span>上下文</span><em>等待</em></li>
+            <li data-stage="inspect"><span>安全检查</span><em>等待</em></li>
+            <li data-stage="tool"><span>工具调用</span><em>等待</em></li>
+            <li data-stage="response"><span>生成回复</span><em>等待</em></li>
+            <li data-stage="done"><span>完成</span><em>等待</em></li>
+          </ol>
+        </section>
+
+        <section class="monitor-section" aria-labelledby="summary-title">
+          <div class="section-title">
+            <h3 id="summary-title">运行概览</h3>
+          </div>
+          <dl class="metrics-grid">
+            <div><dt>阶段事件</dt><dd id="event-count">0</dd></div>
+            <div><dt>工具调用</dt><dd id="tool-count">0</dd></div>
+            <div><dt>计划字符</dt><dd id="plan-count">0</dd></div>
+            <div><dt>回复字符</dt><dd id="response-count">0</dd></div>
+          </dl>
+        </section>
+
+        <section class="monitor-section" aria-labelledby="plan-title">
+          <div class="section-title">
+            <h3 id="plan-title">计划摘要</h3>
+          </div>
+          <div id="plan-summary" class="plan-summary empty-state">等待规划完成。</div>
+        </section>
+
+        <section class="monitor-section" aria-labelledby="tools-title">
+          <div class="section-title">
+            <h3 id="tools-title">工具调用</h3>
+          </div>
+          <ul id="tool-list" class="tool-list" aria-live="polite"></ul>
+        </section>
+
+        <section class="monitor-section" aria-labelledby="timeline-title">
+          <div class="section-title">
+            <h3 id="timeline-title">阶段时间线</h3>
+            <span id="timeline-state">0 条</span>
+          </div>
+          <ol id="events" class="events" aria-live="polite"></ol>
+        </section>
+
+        <details class="debug-panel">
+          <summary>调试详情</summary>
+          <div class="debug-meta">
+            <span id="payload-type">无事件</span>
+            <span id="raw-count">0 raw</span>
+          </div>
+          <pre id="latest-payload" class="payload-box">{}</pre>
+          <ol id="raw-events" class="raw-events"></ol>
+        </details>
+      </aside>
+    </div>
+  </body>
+</html>
