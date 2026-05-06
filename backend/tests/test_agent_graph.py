@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest
-
+import solo_agent.agent.graph as graph_module
 from solo_agent.agent import AgentDeps, AgentSettings, build_langgraph_topology, run_agent_events
 from solo_agent.agent.prompts import (
     PLANNER_SYSTEM_PROMPT,
@@ -78,6 +78,29 @@ class HeuristicToolRegistry:
         self.calls.append((name, arguments))
         payload = "x" * 500 if self.long_output else f"{name} ok"
         return {"ok": True, "tool": name, "result": payload}
+
+
+class ProtocolToolRegistry:
+    def __init__(self, hashes: dict[str, str] | None = None) -> None:
+        self.hashes = hashes or {}
+        self.calls: list[tuple[str, dict]] = []
+
+    def list_tools(self) -> list[dict[str, str]]:
+        return [
+            {"name": "prepare_edit"},
+            {"name": "get_file_hash"},
+            {"name": "preview_patch"},
+            {"name": "apply_text_edit"},
+            {"name": "run_pytest"},
+        ]
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        path = arguments.get("path", "backend/src/solo_agent/app.py")
+        expected_hash = arguments.get("expected_hash") or self.hashes.get(name) or "hash-1"
+        if name == "run_pytest":
+            return {"ok": False, "result": {"exit_code": 1, "failed": True}}
+        return {"ok": True, "result": {"path": path, "expected_hash": expected_hash}}
 
 
 class TrackingPersistence:
@@ -190,7 +213,7 @@ def test_skill_context_block_sanitizes_fence_escape() -> None:
 async def test_agent_graph_injects_session_history(tmp_path) -> None:
     from solo_agent.memory import MessageRole, init_sqlite_memory
 
-    repo = await init_sqlite_memory(tmp_path / "memory.sqlite3")
+    repo = await init_sqlite_memory(tmp_path / "memory.sqlite3", memory_root=tmp_path)
     session = await repo.create_session(title="Demo")
     old_run = await repo.create_run(session_id=session.id)
     current_run = await repo.create_run(session_id=session.id)
@@ -262,7 +285,7 @@ async def test_agent_graph_injects_skills_as_user_message_only(tmp_path) -> None
     assert any(event.type == "skill_loaded" for event in events)
     assert any(event.type == "skill_context_built" for event in events)
     assert any(event.type == "tool_protocol_applied" for event in events)
-    assert any(event.type == "iron_law_warning" for event in events)
+    assert any(event.type == "iron_law_blocked" for event in events)
 
 
 @pytest.mark.asyncio
@@ -359,11 +382,230 @@ async def test_agent_graph_applies_tool_cutoff_and_output_budget() -> None:
     assert events[-1].type == "run_completed"
 
 
+async def _run_with_proposed_tools(monkeypatch, calls, user_input: str, *, cutoff: int = 8):
+    async def fake_propose_tool_calls(tool_registry, state, settings):
+        return calls
+
+    monkeypatch.setattr(graph_module, "_propose_tool_calls", fake_propose_tool_calls)
+    registry = ProtocolToolRegistry()
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            user_input,
+            deps=AgentDeps(provider=FakeProvider(), tool_registry=registry),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                max_tool_calls=len(calls),
+                tool_call_cut_off=cutoff,
+            ),
+        )
+    ]
+    return events, registry
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_rejects_bare_apply_text_edit(monkeypatch) -> None:
+    calls = [
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        }
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "fix the production bug after seeing a failing test",
+    )
+
+    assert registry.calls == []
+    violation = next(event for event in events if event.type == "tool_protocol_blocked")
+    assert violation.data["name"] == "apply_text_edit"
+    assert violation.data["reason"] == "apply_text_edit_protocol_incomplete"
+    assert set(violation.data["missing"]) == {"prepare_edit_or_get_file_hash", "preview_patch"}
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_allows_apply_after_hash_and_preview(monkeypatch) -> None:
+    calls = [
+        {"name": "get_file_hash", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {"path": "backend/src/solo_agent/app.py", "expected_hash": "hash-1"},
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "fix the production bug after seeing a failing test",
+        cutoff=4,
+    )
+
+    assert [name for name, _ in registry.calls] == [
+        "get_file_hash",
+        "preview_patch",
+        "apply_text_edit",
+    ]
+    assert not any(event.type == "tool_protocol_blocked" for event in events)
+    assert any(event.type == "verification_required" for event in events)
+    assert not any(event.type == "verification_deferred" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_rejects_apply_when_preview_hash_differs(monkeypatch) -> None:
+    calls = [
+        {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {"path": "backend/src/solo_agent/app.py", "expected_hash": "hash-2"},
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "fix the production bug after seeing a failing test",
+    )
+
+    assert [name for name, _ in registry.calls] == ["prepare_edit", "preview_patch"]
+    violation = next(event for event in events if event.type == "tool_protocol_blocked")
+    assert violation.data["reason"] == "apply_text_edit_protocol_incomplete"
+    assert violation.data["missing"] == ["preview_patch"]
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_blocks_production_apply_without_failing_test_signal(monkeypatch) -> None:
+    calls = [
+        {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {"path": "backend/src/solo_agent/app.py", "expected_hash": "hash-1"},
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "implement a production code change",
+    )
+
+    assert any(event.type == "iron_law_blocked" for event in events)
+    assert [name for name, _ in registry.calls] == ["prepare_edit", "preview_patch"]
+    violation = next(event for event in events if event.type == "tool_protocol_blocked")
+    assert violation.data["reason"] == "iron_law_blocked"
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_warns_but_allows_apply_when_user_skips_tests(monkeypatch) -> None:
+    calls = [
+        {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {"path": "backend/src/solo_agent/app.py", "expected_hash": "hash-1"},
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "implement a production code change and skip tests",
+    )
+
+    assert any(event.type == "iron_law_warning" for event in events)
+    assert not any(event.type == "iron_law_blocked" for event in events)
+    assert [name for name, _ in registry.calls] == [
+        "prepare_edit",
+        "preview_patch",
+        "apply_text_edit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_defers_verification_when_cutoff_is_exhausted(monkeypatch) -> None:
+    calls = [
+        {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {"path": "backend/src/solo_agent/app.py", "expected_hash": "hash-1"},
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "fix the production bug after seeing a failing test",
+        cutoff=3,
+    )
+
+    assert [name for name, _ in registry.calls] == [
+        "prepare_edit",
+        "preview_patch",
+        "apply_text_edit",
+    ]
+    assert any(event.type == "verification_required" for event in events)
+    deferred = next(event for event in events if event.type == "verification_deferred")
+    assert deferred.data["reason"] == "tool_call_cut_off_reached_after_edit"
+
+
 @pytest.mark.asyncio
 async def test_agent_graph_summary_failure_does_not_block_run(tmp_path) -> None:
     from solo_agent.memory import MessageRole, init_sqlite_memory
 
-    repo = await init_sqlite_memory(tmp_path / "memory.sqlite3")
+    repo = await init_sqlite_memory(tmp_path / "memory.sqlite3", memory_root=tmp_path)
     session = await repo.create_session(title="Demo")
     run = await repo.create_run(session_id=session.id)
     for index in range(3):
@@ -391,6 +633,41 @@ async def test_agent_graph_summary_failure_does_not_block_run(tmp_path) -> None:
 
     assert any(event.type == "memory_summary_failed" for event in events)
     assert events[-1].type == "run_completed"
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_context_guard_compresses_by_token_budget(tmp_path) -> None:
+    from solo_agent.memory import init_sqlite_memory
+
+    repo = await init_sqlite_memory(tmp_path / "memory.sqlite3", memory_root=tmp_path)
+    session = await repo.create_session(title="Demo")
+    run = await repo.create_run(session_id=session.id)
+    provider = FakeProvider()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            session.id,
+            run.id,
+            "Summarize this project",
+            deps=AgentDeps(provider=provider, persistence=repo),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                context_window_tokens=1,
+                summary_trigger_messages=999,
+            ),
+        )
+    ]
+
+    summary = await repo.get_latest_summary(session.id)
+
+    assert any(event.type == "context_budget_checked" for event in events)
+    assert any(event.type == "context_compression_started" for event in events)
+    assert any(event.type == "context_compression_completed" for event in events)
+    assert any(event.type == "task_state_injected" for event in events)
+    assert summary is not None
+    assert summary.metadata_["context_stats"]["compression_count"] >= 1
 
 
 @pytest.mark.asyncio

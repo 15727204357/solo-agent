@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from solo_agent.context import WorkspaceTaskStore
+
 DEFAULT_EXCLUDES = {
     ".git",
     ".hg",
@@ -401,6 +403,81 @@ class WorkspaceTools:
             max_output_bytes=max_output_bytes,
         )
 
+    def git_status(
+        self,
+        *,
+        timeout_seconds: int = 30,
+        max_output_bytes: int = 12_000,
+    ) -> dict[str, Any]:
+        return self._run_git_command(
+            ["git", "status", "--short", "--branch"],
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+
+    def git_diff(
+        self,
+        *,
+        path: str | None = None,
+        timeout_seconds: int = 30,
+        max_output_bytes: int = 24_000,
+    ) -> dict[str, Any]:
+        command = ["git", "diff", "--"]
+        if path:
+            command.append(self._relative(self._resolve_command_target(path)))
+        return self._run_git_command(
+            command,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+
+    def git_recent_changes(
+        self,
+        *,
+        limit: int = 10,
+        path: str | None = None,
+        timeout_seconds: int = 30,
+        max_output_bytes: int = 16_000,
+    ) -> dict[str, Any]:
+        bounded_limit = max(1, min(int(limit), 50))
+        command = ["git", "log", "--oneline", "--decorate", f"-n{bounded_limit}", "--"]
+        if path:
+            command.append(self._relative(self._resolve_command_target(path)))
+        return self._run_git_command(
+            command,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+
+    def read_test_failure(
+        self,
+        output: str,
+        *,
+        max_failures: int = 10,
+    ) -> dict[str, Any]:
+        failures = _parse_pytest_failures(output, max_failures=max_failures)
+        return {
+            "failure_count": len(failures),
+            "failures": failures,
+            "truncated": len(failures) >= max_failures,
+        }
+
+    def targeted_pytest(
+        self,
+        target: str,
+        *,
+        timeout_seconds: int = 60,
+        max_output_bytes: int = 32_000,
+    ) -> dict[str, Any]:
+        pytest_target = self._resolve_pytest_target(target)
+        result = self._run_allowed_command(
+            ["uv", "run", "--extra", "dev", "python", "-m", "pytest", "-q", pytest_target],
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+        result["failures"] = _parse_pytest_failures(str(result.get("output", "")))
+        return result
+
     def list_skills(
         self,
         *,
@@ -473,6 +550,62 @@ class WorkspaceTools:
         selected = sorted(scored, key=lambda item: (-item["score"], item["path"]))[:limit]
         return {"skills": selected, "truncated": listed["truncated"]}
 
+    def task_create(
+        self,
+        thread_id: str,
+        subject: str,
+        *,
+        description: str = "",
+        status: str = "pending",
+        active_form: str = "",
+        blocked_by: list[str] | None = None,
+        blocks: list[str] | None = None,
+        owner: str = "solo-agent",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return WorkspaceTaskStore(self.workspace_root).create_task(
+            thread_id,
+            subject=subject,
+            description=description,
+            status=status,
+            active_form=active_form,
+            blocked_by=blocked_by or [],
+            blocks=blocks or [],
+            owner=owner,
+            metadata=metadata or {"source": "task_create"},
+        )
+
+    def task_get(self, thread_id: str, task_id: str) -> dict[str, Any]:
+        return WorkspaceTaskStore(self.workspace_root).get_task(thread_id, task_id)
+
+    def task_list(self, thread_id: str, *, include_deleted: bool = False) -> dict[str, Any]:
+        return WorkspaceTaskStore(self.workspace_root).list_tasks(thread_id, include_deleted=include_deleted)
+
+    def task_update(
+        self,
+        thread_id: str,
+        task_id: str,
+        *,
+        subject: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+        active_form: str | None = None,
+        blocked_by: list[str] | None = None,
+        blocks: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return WorkspaceTaskStore(self.workspace_root).update_task(
+            thread_id,
+            task_id,
+            subject=subject,
+            description=description,
+            status=status,
+            active_form=active_form,
+            blocked_by=blocked_by,
+            blocks=blocks,
+            metadata=metadata,
+        )
+
     def _build_updated_text(
         self,
         file_path: Path,
@@ -540,11 +673,48 @@ class WorkspaceTools:
                 "truncated": output["truncated"],
             }
 
+    def _run_git_command(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: int,
+        max_output_bytes: int,
+    ) -> dict[str, Any]:
+        result = self._run_allowed_command(
+            command,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+        )
+        output = str(result.get("output", ""))
+        if result.get("returncode") == 128 and "not a git repository" in output.lower():
+            result["error"] = {
+                "code": "not_git_repository",
+                "message": "Workspace is not inside a git repository.",
+            }
+        return result
+
     def _resolve_command_target(self, target: str) -> Path:
         resolved = self._resolve_inside_workspace(target)
         if self._is_excluded(resolved):
             raise PermissionError(f"Command target is excluded: {target}")
         return resolved
+
+    def _resolve_pytest_target(self, target: str) -> str:
+        if not target.strip():
+            raise ValueError("targeted_pytest requires a test path or node id")
+
+        path_text, *selectors = target.split("::")
+        test_path = self._resolve_command_target(path_text)
+        if not test_path.exists():
+            raise ValueError(f"Test target does not exist: {path_text}")
+        if selectors and not test_path.is_file():
+            raise ValueError("Pytest node ids must target a test file")
+        if not _is_test_path(test_path, self.workspace_root):
+            raise ValueError("targeted_pytest only accepts workspace test paths")
+        for selector in selectors:
+            if not _SAFE_PYTEST_SELECTOR_RE.fullmatch(selector):
+                raise ValueError(f"Unsafe pytest selector: {selector}")
+        return "::".join([self._relative(test_path), *selectors])
 
     def _resolve_skill_path(self, path_or_name: str) -> Path:
         try:
@@ -707,6 +877,104 @@ def _truncate_text(text: str, max_bytes: int) -> dict[str, Any]:
 
 def _display_command(command: Sequence[str]) -> str:
     return " ".join(command)
+
+
+_FAILED_SUMMARY_RE = re.compile(r"^FAILED\s+(?P<nodeid>\S+?)(?:\s+-\s+(?P<reason>.*))?$")
+_FAILURE_HEADER_RE = re.compile(r"^_{2,}\s+(?P<test>.+?)\s+_{2,}$")
+_LOCATION_RE = re.compile(r"(?P<path>[\w./\\-]+\.py):\d+")
+_SAFE_PYTEST_SELECTOR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[A-Za-z0-9_.:,/+= -]+\])?")
+
+
+def _parse_pytest_failures(output: str, *, max_failures: int = 10) -> list[dict[str, str | None]]:
+    lines = output.splitlines()
+    snippets_by_test = _assertion_snippets_by_test(lines)
+    failures: list[dict[str, str | None]] = []
+
+    for line in lines:
+        match = _FAILED_SUMMARY_RE.match(line.strip())
+        if not match:
+            continue
+        nodeid = match.group("nodeid")
+        path, test_name = _split_pytest_nodeid(nodeid)
+        failures.append(
+            {
+                "path": path,
+                "test": test_name,
+                "assertion": snippets_by_test.get(test_name),
+                "summary": match.group("reason"),
+            }
+        )
+        if len(failures) >= max_failures:
+            return failures
+
+    if failures:
+        return failures
+
+    current_test: str | None = None
+    current_path: str | None = None
+    current_assertion: str | None = None
+    for line in lines:
+        header = _FAILURE_HEADER_RE.match(line.strip())
+        if header:
+            if current_test:
+                failures.append({"path": current_path, "test": current_test, "assertion": current_assertion, "summary": None})
+                if len(failures) >= max_failures:
+                    return failures
+            current_test = header.group("test")
+            current_path = None
+            current_assertion = None
+            continue
+        if current_test and current_path is None:
+            location = _LOCATION_RE.search(line)
+            if location:
+                current_path = location.group("path").replace("\\", "/")
+        if current_test and current_assertion is None:
+            snippet = _extract_assertion_line(line)
+            if snippet:
+                current_assertion = snippet
+
+    if current_test and len(failures) < max_failures:
+        failures.append({"path": current_path, "test": current_test, "assertion": current_assertion, "summary": None})
+    return failures
+
+
+def _assertion_snippets_by_test(lines: list[str]) -> dict[str, str]:
+    snippets: dict[str, str] = {}
+    current_test: str | None = None
+    for line in lines:
+        header = _FAILURE_HEADER_RE.match(line.strip())
+        if header:
+            current_test = header.group("test")
+            continue
+        if current_test and current_test not in snippets:
+            snippet = _extract_assertion_line(line)
+            if snippet:
+                snippets[current_test] = snippet
+    return snippets
+
+
+def _extract_assertion_line(line: str) -> str | None:
+    stripped = line.strip()
+    if stripped.startswith("E       "):
+        stripped = stripped.removeprefix("E       ").strip()
+    if stripped.startswith(">"):
+        stripped = stripped.lstrip("> ").strip()
+    if stripped.startswith("assert "):
+        return stripped
+    return None
+
+
+def _split_pytest_nodeid(nodeid: str) -> tuple[str, str]:
+    path, *selectors = nodeid.split("::")
+    return path.replace("\\", "/"), "::".join(selectors)
+
+
+def _is_test_path(path: Path, root: Path) -> bool:
+    relative = path.relative_to(root)
+    parts = relative.parts
+    if "tests" in parts:
+        return True
+    return path.is_file() and path.suffix == ".py" and (path.name.startswith("test_") or path.name.endswith("_test.py"))
 
 
 def _sanitize_skill(text: str) -> str:

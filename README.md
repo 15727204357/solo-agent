@@ -36,6 +36,22 @@ Solo Agent 是一个 Python 生态的 Web 版个人编程助手 MVP。它不是�
 - 代码质量：Ruff
 - 项目管理：uv
 
+## 项目结构
+
+当前目录按 Web 端 Agent 产品形态拆分，前后端边界更接近 DeerFlow 2.0 这类全栈 Agent 项目：
+
+```text
+backend/
+  src/solo_agent/      # Python 后端、Agent runtime、API、Provider、Memory、Tools
+  tests/               # 后端测试
+frontend/
+  templates/           # Jinja2 页面模板
+  static/              # 原生 CSS/JS 静态资源
+docs/                  # 产品与工程文档
+skills/                # Agent skill/SOP
+data/                  # 本地运行数据
+```
+
 ## 本地运行
 
 推荐使用 `uv`：
@@ -144,7 +160,7 @@ uv run --extra dev ruff check .
 
 这一版适合作为“Agent 工程入门到可展示作品”的第一阶段练习。你可以具体学到：
 
-- 如何从零搭建一个 Python `src/` layout 项目，并用 `pyproject.toml`、`uv`、`ruff`、`pytest` 管理工程质量。
+- 如何从零搭建一个 Python `backend/src` 分层项目，并用 `pyproject.toml`、`uv`、`ruff`、`pytest` 管理工程质量。
 - 如何用 FastAPI 设计 Web 后端，包括路由、依赖注入、后台任务、健康检查和 API 测试。
 - 如何用 Server-Sent Events 把 Agent 的中间过程流式推给前端，而不是只返回最终答案。
 - 如何设计一个 Agent Loop，把规划、上下文、安全检查、工具调用、回答和持久化拆成清晰阶段。

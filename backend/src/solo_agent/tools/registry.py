@@ -242,6 +242,78 @@ class ToolRegistry:
         )
         self.register(
             ToolSpec(
+                name="git_status",
+                description="Run git status --short --branch in the workspace.",
+                read_only=True,
+                handler=self._workspace_tools.git_status,
+                category="vcs",
+                risk_level="low",
+                timeout_seconds=30,
+                max_output_bytes=12_000,
+                progress_labels=("command_started", "command_completed"),
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="git_diff",
+                description="Run git diff for the workspace or a single workspace path.",
+                read_only=True,
+                handler=self._workspace_tools.git_diff,
+                category="vcs",
+                risk_level="medium",
+                timeout_seconds=30,
+                max_output_bytes=24_000,
+                progress_labels=("command_started", "command_completed"),
+                parameters={"path": "Optional workspace path to diff."},
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="git_recent_changes",
+                description="Show recent git commits with a short oneline log.",
+                read_only=True,
+                handler=self._workspace_tools.git_recent_changes,
+                category="vcs",
+                risk_level="low",
+                timeout_seconds=30,
+                max_output_bytes=16_000,
+                progress_labels=("command_started", "command_completed"),
+                parameters={
+                    "limit": "Maximum commits to show, capped at 50.",
+                    "path": "Optional workspace path to filter recent commits.",
+                },
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="read_test_failure",
+                description="Extract failed pytest files, test names, and assertion snippets from pytest output.",
+                read_only=True,
+                handler=self._workspace_tools.read_test_failure,
+                category="quality",
+                risk_level="low",
+                parameters={
+                    "output": "Pytest stdout/stderr text to parse.",
+                    "max_failures": "Maximum failures to return.",
+                },
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="targeted_pytest",
+                description="Run pytest -q against one validated workspace test path or node id.",
+                read_only=True,
+                handler=self._workspace_tools.targeted_pytest,
+                category="quality",
+                risk_level="medium",
+                timeout_seconds=60,
+                max_output_bytes=24_000,
+                progress_labels=("command_started", "command_completed"),
+                parameters={"target": "Workspace test path or path::test_name node id."},
+            )
+        )
+        self.register(
+            ToolSpec(
                 name="list_skills",
                 description="List project SKILL.md files available to the agent.",
                 read_only=True,
@@ -270,6 +342,70 @@ class ToolRegistry:
                 parameters={
                     "task": "Current user task.",
                     "max_skills": "Maximum skills to select.",
+                },
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="task_create",
+                description="Create a structured TaskList item for a LangGraph thread.",
+                read_only=False,
+                handler=self._workspace_tools.task_create,
+                category="task",
+                risk_level="low",
+                parameters={
+                    "thread_id": "Current LangGraph thread/session id.",
+                    "subject": "Imperative task subject.",
+                    "description": "Optional task details.",
+                    "status": "pending, in_progress, completed, blocked, or deleted.",
+                    "active_form": "Present-continuous form for resume prompts.",
+                    "blocked_by": "Optional blocking task ids or reasons.",
+                    "blocks": "Optional task ids this task blocks.",
+                },
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="task_get",
+                description="Get a structured TaskList item by id.",
+                read_only=True,
+                handler=self._workspace_tools.task_get,
+                category="task",
+                risk_level="low",
+                parameters={"thread_id": "Current LangGraph thread/session id.", "task_id": "Task id."},
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="task_list",
+                description="List structured TaskList items for a LangGraph thread.",
+                read_only=True,
+                handler=self._workspace_tools.task_list,
+                category="task",
+                risk_level="low",
+                parameters={
+                    "thread_id": "Current LangGraph thread/session id.",
+                    "include_deleted": "Whether deleted tasks should be returned.",
+                },
+            )
+        )
+        self.register(
+            ToolSpec(
+                name="task_update",
+                description="Update a structured TaskList item.",
+                read_only=False,
+                handler=self._workspace_tools.task_update,
+                category="task",
+                risk_level="low",
+                parameters={
+                    "thread_id": "Current LangGraph thread/session id.",
+                    "task_id": "Task id.",
+                    "subject": "Optional replacement subject.",
+                    "description": "Optional replacement description.",
+                    "status": "Optional status update.",
+                    "active_form": "Optional resume wording.",
+                    "blocked_by": "Optional blockers.",
+                    "blocks": "Optional task ids this task blocks.",
                 },
             )
         )
@@ -368,6 +504,8 @@ class ToolRegistry:
 
         combined = " ".join(_flatten_values(call.arguments))
         text_result = inspector.inspect_text(combined)
+        if spec.category == "task" and text_result.allowed:
+            return InspectionResult.allow({"tool": call.name, "task_state_tool": True})
         if text_result.code == "write_not_allowed" and spec.category == "edit":
             return InspectionResult.allow({"tool": call.name, "safe_edit_tool": True})
         return text_result

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
-
 from solo_agent.web.app import create_app
 from solo_agent.web.routes import get_repository, get_runner
 from solo_agent.web.store import InMemorySessionRepository

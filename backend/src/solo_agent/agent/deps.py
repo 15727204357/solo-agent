@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from solo_agent.providers import ChatProvider
@@ -9,6 +10,7 @@ from solo_agent.providers import ChatProvider
 @dataclass(frozen=True)
 class AgentSettings:
     provider: str = "openai"
+    workspace_root: str | Path | None = None
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
@@ -25,6 +27,14 @@ class AgentSettings:
     memory_search_limit: int = 5
     summary_trigger_messages: int = 8
     summary_max_tokens: int = 700
+    context_window_tokens: int = 128_000
+    context_regular_threshold: float = 0.80
+    context_long_task_threshold: float = 0.50
+    context_long_task_after_compressions: int = 2
+    context_tool_output_cutoff: int = 10
+    auxiliary_compression_provider: str = "ollama"
+    auxiliary_compression_model: str = "qwen3.5:4b"
+    auxiliary_compression_base_url: str = "http://localhost:11434"
     memory_enabled: bool = True
     conversation_history_enabled: bool = True
     extra_headers: dict[str, str] = field(default_factory=dict)

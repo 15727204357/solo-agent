@@ -22,6 +22,8 @@ dependencies = [
   "pydantic-settings>=2.4,<3.0",
   "python-multipart>=0.0.9,<1.0",
   "sqlalchemy[asyncio]>=2.0,<3.0",
+  "tree-sitter>=0.24,<1.0",
+  "tree-sitter-language-pack>=0.9,<1.0",
   "uvicorn[standard]>=0.30,<1.0"
 ]
 
@@ -36,16 +38,19 @@ dev = [
 solo-agent-web = "solo_agent.web.app:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"" = "backend/src"}
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["backend/src"]
 
-[tool.setuptools.package-data]
-solo_agent = [
-  "templates/*.html",
-  "static/*.css",
-  "static/*.js"
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+
+[tool.setuptools.data-files]
+"frontend/templates" = ["frontend/templates/*.html"]
+"frontend/static" = [
+  "frontend/static/*.css",
+  "frontend/static/*.js"
 ]
 
 [tool.ruff]

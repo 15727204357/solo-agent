@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from solo_agent.inspectors import SecurityInspector, ToolCall
@@ -141,6 +142,96 @@ def test_quality_tools_are_allowlisted_and_bounded(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["metadata"]["category"] == "quality"
     assert result["result"]["returncode"] == 0
+
+
+def test_limited_git_and_targeted_pytest_tools_are_exposed(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path)
+
+    tools = {tool["name"]: tool for tool in registry.list_tools()}
+
+    assert tools["git_status"]["category"] == "vcs"
+    assert tools["git_status"]["read_only"] is True
+    assert tools["git_diff"]["parameters"]["path"] == "Optional workspace path to diff."
+    assert tools["git_recent_changes"]["max_output_bytes"] == 16_000
+    assert tools["read_test_failure"]["category"] == "quality"
+    assert tools["targeted_pytest"]["risk_level"] == "medium"
+    assert tools["targeted_pytest"]["requires_approval"] is False
+
+
+def test_git_tools_reject_paths_outside_workspace(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path)
+
+    diff = registry.call("git_diff", {"path": "../outside.py"})
+    recent = registry.call("git_recent_changes", {"path": "../outside.py"})
+
+    assert diff["ok"] is False
+    assert recent["ok"] is False
+    assert "escapes workspace" in diff["error"]
+    assert "escapes workspace" in recent["error"]
+
+
+def test_git_status_reports_structured_non_git_error(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path)
+
+    result = registry.call("git_status", {})
+
+    assert result["ok"] is True
+    assert result["result"]["returncode"] == 128
+    assert result["result"]["error"]["code"] == "not_git_repository"
+
+
+def test_read_test_failure_extracts_pytest_failure_details(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path)
+    output = (
+        "______________________________ test_add ______________________________\n"
+        "\n"
+        "    def test_add():\n"
+        ">       assert 1 == 2\n"
+        "E       assert 1 == 2\n"
+        "\n"
+        "FAILED tests/test_demo.py::test_add - assert 1 == 2\n"
+    )
+
+    result = registry.call("read_test_failure", {"output": output})
+
+    assert result["ok"] is True
+    assert result["result"]["failure_count"] == 1
+    assert result["result"]["failures"][0]["path"] == "tests/test_demo.py"
+    assert result["result"]["failures"][0]["test"] == "test_add"
+    assert result["result"]["failures"][0]["assertion"] == "assert 1 == 2"
+
+
+def test_targeted_pytest_accepts_only_workspace_test_nodeids(tmp_path: Path, monkeypatch) -> None:
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_demo.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    registry = create_default_registry(tmp_path)
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, "1 passed\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = registry.call("targeted_pytest", {"target": "tests/test_demo.py::test_ok"})
+    escaped = registry.call("targeted_pytest", {"target": "../test_demo.py::test_ok"})
+
+    assert result["ok"] is True
+    assert captured["command"] == [
+        "uv",
+        "run",
+        "--extra",
+        "dev",
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_demo.py::test_ok",
+    ]
+    assert result["metadata"]["category"] == "quality"
+    assert escaped["ok"] is False
+    assert "escapes workspace" in escaped["error"]
 
 
 def test_tool_registry_exposes_v1_contract_metadata(tmp_path: Path) -> None:

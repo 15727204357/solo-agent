@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from solo_agent.providers import (
     OllamaProvider,
     OpenAICompatibleProvider,

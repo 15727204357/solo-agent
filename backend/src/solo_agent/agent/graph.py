@@ -3,8 +3,10 @@
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
+from pathlib import Path
 from typing import Any, TypedDict
 
+from solo_agent.context import ContextManager, ContextTokenEstimator, SubdirectoryHintTracker, TaskListState
 from solo_agent.providers import ChatMessage, ChatProvider, create_provider_from_settings
 
 from .deps import AgentDeps, AgentSettings
@@ -53,15 +55,19 @@ def build_langgraph_topology() -> Any:
         "select_skills",
         "load_skills",
         "build_skill_context_block",
+        "context_guard_before_plan",
         "plan",
+        "task_state_update",
         "collect_context",
         "inspect",
         "select_tools",
         "execute_tools",
+        "subdirectory_hint_track",
+        "context_guard_before_respond",
         "respond",
         "sync_all",
         "queue_prefetch_all",
-        "on_pre_compress",
+        "context_guard_after_run",
         "persist_snapshot",
         "finish",
     )
@@ -126,7 +132,12 @@ async def _run_graph(
     async for event in _skill_context_stage(state, deps, settings):
         yield event
 
+    async for event in _context_guard_stage(state, provider, deps, settings, phase="before_plan"):
+        yield event
+
     async for event in _plan_node(state, provider, settings):
+        yield event
+    async for event in _task_state_stage(state):
         yield event
 
     async for event in _collect_context_node(state, deps, settings):
@@ -149,6 +160,11 @@ async def _run_graph(
         yield event
 
     async for event in _execute_tools_node(state, deps, settings):
+        yield event
+    async for event in _subdirectory_hint_stage(state, settings):
+        yield event
+
+    async for event in _context_guard_stage(state, provider, deps, settings, phase="before_respond"):
         yield event
 
     async for event in _respond_node(state, provider, settings):
@@ -483,16 +499,24 @@ async def _select_tools_node(
                 "proposed_tool_calls": proposed,
             },
         )
-    if _needs_iron_law_warning(state):
+    iron_law = _iron_law_decision(state, proposed)
+    if iron_law["action"] != "none":
+        state.snapshots["iron_law"] = iron_law
+    if iron_law["action"] == "blocked":
+        yield _event(
+            state,
+            "iron_law_blocked",
+            "select_tools",
+            "Production-code edit intent detected without a failing-test signal",
+            iron_law,
+        )
+    elif iron_law["action"] == "warning":
         yield _event(
             state,
             "iron_law_warning",
             "select_tools",
             "Production-code intent detected without an explicit failing-test signal",
-            {
-                "reason": "iron-law skill is active and no failing test was referenced",
-                "current_task_priority": "user_input",
-            },
+            iron_law,
         )
 
     yield _event(
@@ -536,6 +560,7 @@ async def _execute_tools_node(
         return
 
     approved: list[dict[str, Any]] = []
+    protocol_state = _new_tool_protocol_state(state)
     cutoff = int(_setting(settings, "tool_call_cut_off", _setting(settings, "max_tool_calls", 3)))
     output_max_bytes = int(_setting(settings, "tool_output_max_bytes", 12_000))
     attempted = 0
@@ -582,6 +607,36 @@ async def _execute_tools_node(
             f"Inspecting tool {name}",
             {"name": name, "status": "inspecting"},
         )
+        protocol_violation = _tool_protocol_violation(state, name, arguments, protocol_state)
+        if protocol_violation is not None:
+            state.tool_calls.append(
+                ToolCallRecord(
+                    name=name,
+                    arguments=arguments,
+                    blocked=True,
+                    reason=protocol_violation["reason"],
+                )
+            )
+            yield _event(
+                state,
+                "tool_protocol_blocked",
+                "execute_tools",
+                "Tool call rejected by the edit protocol",
+                {"name": name, "arguments": arguments, **protocol_violation},
+            )
+            yield _event(
+                state,
+                "tool_call_completed",
+                "execute_tools",
+                "Tool call rejected by the edit protocol",
+                {
+                    "name": name,
+                    "blocked": True,
+                    "reason": protocol_violation["reason"],
+                    "protocol": protocol_violation,
+                },
+            )
+            continue
         inspection = await _inspect(deps.safety_inspector, "tool_call", call)
         if not inspection["allowed"]:
             state.tool_calls.append(
@@ -614,6 +669,7 @@ async def _execute_tools_node(
             {"name": name, "status": "executing"},
         )
         raw_result = await _call_tool(deps.tool_registry, name, arguments)
+        raw_result_ok = _tool_result_ok(raw_result)
         result, output_metadata = _truncate_tool_result(raw_result, output_max_bytes)
         yield _event(
             state,
@@ -638,7 +694,9 @@ async def _execute_tools_node(
             f"Tool {name} completed",
             {"name": name, "result": result, "metadata": output_metadata},
         )
-        if name == "apply_text_edit" and _tool_result_ok(result):
+        if raw_result_ok:
+            _record_tool_protocol_success(protocol_state, name, arguments, raw_result)
+        if name == "apply_text_edit" and raw_result_ok:
             yield _event(
                 state,
                 "verification_required",
@@ -646,6 +704,20 @@ async def _execute_tools_node(
                 "A file edit was applied; verification is required",
                 {"recommended_tools": ["run_pytest", "run_ruff_check"]},
             )
+            remaining_budget = cutoff - attempted
+            if remaining_budget <= 0:
+                yield _event(
+                    state,
+                    "verification_deferred",
+                    "execute_tools",
+                    "Verification is required but the tool call cutoff has been reached",
+                    {
+                        "reason": "tool_call_cut_off_reached_after_edit",
+                        "cutoff": cutoff,
+                        "executed_count": attempted,
+                        "recommended_tools": ["run_pytest", "run_ruff_check"],
+                    },
+                )
 
     state.snapshots["approved_tool_calls"] = approved
 
@@ -718,8 +790,7 @@ async def _compress_memory_stage(
     deps: AgentDeps,
     settings: AgentSettings | Mapping[str, Any],
 ) -> AsyncIterator[AgentEvent]:
-    state.loop_stage = "on_pre_compress"
-    async for event in _maybe_update_summary(state, provider, deps, settings, include_response=True):
+    async for event in _context_guard_stage(state, provider, deps, settings, phase="after_run"):
         yield event
 
 
@@ -795,6 +866,285 @@ async def _load_conversation_context(
             "conversation_history_enabled": history_enabled,
         },
     }
+
+
+async def _context_guard_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+    *,
+    phase: str,
+) -> AsyncIterator[AgentEvent]:
+    state.loop_stage = f"context_guard_{phase}"
+    if not bool(_setting(settings, "memory_enabled", True)):
+        return
+
+    stats = await _call_optional(deps.persistence, "get_context_stats", state.session_id)
+    if isinstance(stats, Mapping):
+        context_stats = dict(stats.get("context_stats") or stats)
+        if "compression_count" in context_stats:
+            state.snapshots["compression_count"] = int(context_stats.get("compression_count") or 0)
+
+    estimator = ContextTokenEstimator()
+    manager = ContextManager(settings=settings, main_provider=provider, estimator=estimator)
+    report = manager.evaluate(state, estimator=estimator)
+    yield _event(
+        state,
+        "context_budget_checked",
+        "context",
+        "Checked context token budget",
+        {
+            "phase": phase,
+            "current_tokens": report.current_tokens,
+            "threshold_tokens": report.threshold_tokens,
+            "threshold_ratio": report.threshold_ratio,
+            "compression_count": report.compression_count,
+            "provider_role": report.provider_role,
+            "should_compress": report.should_compress,
+        },
+    )
+    force_compress = False
+    if not report.should_compress and phase == "after_run":
+        force_compress = await _legacy_summary_trigger_met(state, deps, settings)
+    if not report.should_compress and not force_compress:
+        yield _event(
+            state,
+            "context_compression_skipped",
+            "context",
+            "Context compression skipped; budget is healthy",
+            {"phase": phase, "reason": report.reason},
+        )
+        return
+
+    yield _event(
+        state,
+        "context_compression_started",
+        "context",
+        "Compressing context before continuing",
+        {
+            "phase": phase,
+            "strategy": report.provider_role,
+            "compression_count": report.compression_count,
+            "forced": force_compress,
+        },
+    )
+    try:
+        await _call_optional(
+            deps.persistence,
+            "on_pre_compress",
+            session_id=state.session_id,
+            payload=_context_compression_payload(state),
+        )
+        result = await manager.maybe_compress(state, estimator=estimator, force=force_compress)
+    except Exception as exc:
+        try:
+            result = await _fallback_main_compression(state, provider, settings, estimator, exc)
+        except Exception as fallback_error:
+            state.summary_status = "failed"
+            yield _event(
+                state,
+                "memory_summary_failed",
+                "context",
+                "Context compression failed; continuing without blocking this run",
+                {"phase": phase, "error": str(fallback_error)},
+            )
+            return
+
+    await _persist_context_summary(state, deps, result, phase=phase)
+    _inject_task_state_block(state)
+    state.summary_status = "updated" if result.compressed else state.summary_status
+    yield _event(
+        state,
+        "context_compression_completed",
+        "context",
+        "Context compression completed",
+        {
+            "phase": phase,
+            "compression_count": result.compression_count,
+            "strategy": result.provider_role,
+            "model": result.provider_model,
+            "summary_chars": len(result.summary),
+        },
+    )
+    if state.snapshots.get("task_state_block"):
+        yield _event(
+            state,
+            "task_state_injected",
+            "context",
+            "Injected TaskList state after compression",
+            {"phase": phase, "length": len(str(state.snapshots.get("task_state_block", "")))},
+        )
+
+
+async def _fallback_main_compression(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+    estimator: ContextTokenEstimator,
+    original_error: Exception,
+) -> Any:
+    manager = ContextManager(
+        settings=settings,
+        main_provider=provider,
+        auxiliary_provider=provider,
+        estimator=estimator,
+    )
+    try:
+        return await manager.maybe_compress(state, estimator=estimator, force=True)
+    except Exception as fallback_error:
+        raise RuntimeError(
+            f"context compression failed: {original_error}; fallback failed: {fallback_error}"
+        ) from fallback_error
+
+
+async def _legacy_summary_trigger_met(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> bool:
+    if deps.persistence is None:
+        return False
+    trigger = int(_setting(settings, "summary_trigger_messages", 0))
+    if trigger <= 0:
+        return False
+    count = await _call_optional(deps.persistence, "count_messages", state.session_id)
+    expected_count = int(count or 0)
+    if state.response and expected_count == 0:
+        expected_count = 1
+    return expected_count >= trigger
+
+
+async def _persist_context_summary(
+    state: AgentState,
+    deps: AgentDeps,
+    result: Any,
+    *,
+    phase: str,
+) -> None:
+    if deps.persistence is None or not result.compressed:
+        return
+    context_stats = {
+        "compression_count": result.compression_count,
+        "last_estimated_tokens": result.report.current_tokens,
+        "last_threshold": result.report.threshold_ratio,
+        "last_strategy": result.provider_role,
+        "last_model": result.provider_model,
+    }
+    state.snapshots["compression_count"] = result.compression_count
+    state.snapshots["context_stats"] = context_stats
+    state.conversation_context["summary"] = result.summary.strip()
+    await _call_optional(
+        deps.persistence,
+        "append_or_update_summary_snapshot",
+        session_id=state.session_id,
+        run_id=state.run_id,
+        summary=result.summary.strip(),
+        metadata={
+            "source": "context_manager",
+            "phase": phase,
+            "context_stats": context_stats,
+        },
+    )
+
+
+async def _task_state_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
+    task_state = TaskListState.from_text(state.plan, thread_id=state.session_id)
+    if not task_state.items:
+        return
+    state.snapshots["task_state"] = _task_state_to_dict(task_state)
+    state.snapshots["task_state_json_block"] = task_state.format_json_block()
+    yield _event(
+        state,
+        "task_state_injected",
+        "context",
+        "Captured TaskList state from plan",
+        {
+            "continue_from": task_state.continue_from,
+            "items": state.snapshots["task_state"]["items"],
+            "thread_id": task_state.thread_id,
+        },
+    )
+
+
+async def _subdirectory_hint_stage(
+    state: AgentState,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    workspace_root = Path(_setting(settings, "workspace_root", Path.cwd()) or Path.cwd())
+    tracker = SubdirectoryHintTracker(workspace_root)
+    all_hints: list[Any] = []
+    for record in state.tool_calls:
+        arguments = record.arguments
+        workdir = arguments.get("workdir") or arguments.get("cwd")
+        for key in ("path", "file", "file_path", "target_path"):
+            if arguments.get(key):
+                all_hints.extend(tracker.observe_path(str(arguments[key]), workdir=workdir))
+        for key in ("command", "cmd"):
+            if arguments.get(key):
+                all_hints.extend(tracker.observe_command(str(arguments[key]), workdir=workdir))
+
+    if not all_hints:
+        return
+    block = tracker.format_block(all_hints)
+    state.context.append({"source": "subdirectory_hints", "content": block})
+    yield _event(
+        state,
+        "subdirectory_hint_loaded",
+        "context",
+        "Loaded scoped directory hints",
+        {
+            "loaded": [
+                str(hint.path.relative_to(workspace_root.resolve()))
+                for hint in all_hints
+                if not hint.skipped
+            ],
+            "skipped_risky": [str(hint.path) for hint in all_hints if hint.skipped],
+            "length": len(block),
+        },
+    )
+
+
+def _context_compression_payload(state: AgentState) -> dict[str, Any]:
+    return {
+        "messages": state.conversation_context.get("recent_messages", []),
+        "current_response": state.response,
+        "existing_summary": state.conversation_context.get("summary", ""),
+        "task_state": state.snapshots.get("task_state", {}),
+        "context": state.context,
+        "tool_calls": [
+            {
+                "name": call.name,
+                "arguments": call.arguments,
+                "result": call.result,
+                "blocked": call.blocked,
+                "reason": call.reason,
+            }
+            for call in state.tool_calls
+        ],
+    }
+
+
+def _inject_task_state_block(state: AgentState) -> None:
+    task_state = _task_state_from_snapshot(state.snapshots.get("task_state"))
+    if task_state is None:
+        task_state = TaskListState.from_text(state.plan, thread_id=state.session_id)
+    if not task_state.items:
+        return
+    block = task_state.format_block()
+    state.snapshots["task_state"] = _task_state_to_dict(task_state)
+    state.snapshots["task_state_block"] = block
+    state.memory_context_block = "\n\n".join(part for part in (state.memory_context_block, block) if part)
+
+
+def _task_state_to_dict(task_state: TaskListState) -> dict[str, Any]:
+    return task_state.to_dict()
+
+
+def _task_state_from_snapshot(value: Any) -> TaskListState | None:
+    if not isinstance(value, Mapping):
+        return None
+    return TaskListState.from_payload(dict(value), thread_id=str(value.get("thread_id") or value.get("threadID") or ""))
 
 
 async def _maybe_update_summary(
@@ -1260,29 +1610,256 @@ def _mentions_format(task_lc: str, plan_lc: str) -> bool:
     return any(marker in text for marker in ("ruff format", "format", "格式"))
 
 
-def _needs_iron_law_warning(state: AgentState) -> bool:
+_CODE_CHANGE_MARKERS = (
+    "edit",
+    "modify",
+    "fix",
+    "refactor",
+    "implement",
+    "change",
+    "write code",
+    "修改",
+    "修复",
+    "实现",
+    "重构",
+    "改代码",
+)
+_FAILING_TEST_MARKERS = (
+    "failing test",
+    "failed test",
+    "test fails",
+    "test failure",
+    "red test",
+    "pytest failed",
+    "pytest failure",
+    "失败测试",
+    "测试失败",
+    "失败的测试",
+    "红灯测试",
+)
+_IRON_LAW_WARNING_MARKERS = (
+    "read-only",
+    "read only",
+    "readonly",
+    "explore",
+    "exploration",
+    "inspect only",
+    "skip tests",
+    "skip testing",
+    "without tests",
+    "只读",
+    "探索",
+    "仅查看",
+    "不要修改",
+    "跳过测试",
+    "不用测试",
+)
+_QUALITY_TOOL_NAMES = {"run_pytest", "run_ruff_check", "run_ruff_format_check"}
+_EDIT_PROOF_TOOL_NAMES = {"prepare_edit", "get_file_hash"}
+
+
+def _iron_law_decision(
+    state: AgentState,
+    proposed: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     skill_names = {str(skill.get("name", "")).lower() for skill in state.selected_skills}
-    if "iron-law" not in skill_names:
-        return False
-    task = state.user_input.lower()
-    has_code_change_intent = any(
-        marker in task
-        for marker in (
-            "edit",
-            "modify",
-            "fix",
-            "refactor",
-            "implement",
-            "change",
-            "写",
-            "修改",
-            "修复",
-            "实现",
-            "重构",
+    proposed_calls = list(proposed or [])
+    production_paths = [
+        path
+        for call in proposed_calls
+        if str(call.get("name", "")) == "apply_text_edit"
+        for path in [_normalize_protocol_path(dict(call.get("arguments") or {}).get("path"))]
+        if path and _is_production_path(path)
+    ]
+    if "iron-law" not in skill_names and not production_paths:
+        return {"action": "none"}
+
+    text = f"{state.user_input}\n{state.plan}".lower()
+    has_code_change_intent = any(marker in text for marker in _CODE_CHANGE_MARKERS)
+    if not has_code_change_intent and not production_paths:
+        return {"action": "none"}
+    if _has_failing_test_signal(state):
+        return {"action": "none", "reason": "failing_test_signal_present"}
+
+    warning_only = any(marker in text for marker in _IRON_LAW_WARNING_MARKERS)
+    action = "warning" if warning_only else "blocked"
+    return {
+        "action": action,
+        "reason": "production_edit_without_failing_test_signal",
+        "current_task_priority": "user_input",
+        "production_paths": production_paths,
+        "warning_only": warning_only,
+    }
+
+
+def _new_tool_protocol_state(state: AgentState) -> dict[str, Any]:
+    protocol_state: dict[str, Any] = {
+        "edit_proofs": set(),
+        "previews": set(),
+    }
+    for record in state.tool_calls:
+        if not record.blocked and _tool_result_ok(record.result):
+            _record_tool_protocol_success(
+                protocol_state,
+                record.name,
+                record.arguments,
+                record.result,
+            )
+    return protocol_state
+
+
+def _tool_protocol_violation(
+    state: AgentState,
+    name: str,
+    arguments: Mapping[str, Any],
+    protocol_state: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if name != "apply_text_edit":
+        return None
+
+    path = _normalize_protocol_path(arguments.get("path"))
+    expected_hash = _normalize_protocol_hash(arguments.get("expected_hash"))
+    if not path:
+        return {"reason": "apply_text_edit_missing_path"}
+    if not expected_hash:
+        return {"reason": "apply_text_edit_missing_expected_hash", "path": path}
+
+    iron_law = _iron_law_decision(state, [{"name": name, "arguments": dict(arguments)}])
+    if iron_law["action"] == "blocked":
+        return {"reason": "iron_law_blocked", "path": path, "expected_hash": expected_hash}
+
+    key = (path, expected_hash)
+    has_edit_proof = key in protocol_state.get("edit_proofs", set())
+    has_preview = key in protocol_state.get("previews", set())
+    if not has_edit_proof or not has_preview:
+        missing = []
+        if not has_edit_proof:
+            missing.append("prepare_edit_or_get_file_hash")
+        if not has_preview:
+            missing.append("preview_patch")
+        return {
+            "reason": "apply_text_edit_protocol_incomplete",
+            "path": path,
+            "expected_hash": expected_hash,
+            "missing": missing,
+        }
+
+    return None
+
+
+def _record_tool_protocol_success(
+    protocol_state: dict[str, Any],
+    name: str,
+    arguments: Mapping[str, Any],
+    result: Any,
+) -> None:
+    if name not in _EDIT_PROOF_TOOL_NAMES and name != "preview_patch":
+        return
+
+    path = _normalize_protocol_path(
+        _first_present(
+            arguments.get("path"),
+            _extract_protocol_field(result, ("path", "file_path", "target_path")),
         )
     )
-    has_test_signal = any(marker in task for marker in ("failing test", "失败测试", "pytest", "test", "测试"))
-    return has_code_change_intent and not has_test_signal
+    expected_hash = _normalize_protocol_hash(
+        _first_present(
+            arguments.get("expected_hash"),
+            _extract_protocol_field(
+                result,
+                ("expected_hash", "hash", "file_hash", "sha256", "digest", "current_hash"),
+            ),
+        )
+    )
+    if not path or not expected_hash:
+        return
+
+    key = (path, expected_hash)
+    if name in _EDIT_PROOF_TOOL_NAMES:
+        protocol_state.setdefault("edit_proofs", set()).add(key)
+    elif name == "preview_patch":
+        protocol_state.setdefault("previews", set()).add(key)
+
+
+def _has_failing_test_signal(state: AgentState) -> bool:
+    text = f"{state.user_input}\n{state.plan}".lower()
+    if any(marker in text for marker in _FAILING_TEST_MARKERS):
+        return True
+    return any(
+        record.name in _QUALITY_TOOL_NAMES and _tool_result_failed(record.result)
+        for record in state.tool_calls
+        if not record.blocked
+    )
+
+
+def _tool_result_failed(result: Any) -> bool:
+    if isinstance(result, Mapping):
+        for key in ("ok", "success", "passed"):
+            if key in result:
+                return not bool(result[key])
+        for key in ("exit_code", "returncode", "status_code"):
+            if key in result:
+                try:
+                    return int(result[key]) != 0
+                except (TypeError, ValueError):
+                    return False
+        if bool(result.get("failed", False)):
+            return True
+        nested = result.get("result")
+        if isinstance(nested, Mapping):
+            return _tool_result_failed(nested)
+    return False
+
+
+def _extract_protocol_field(value: Any, names: Iterable[str]) -> Any:
+    if not isinstance(value, Mapping):
+        return None
+    names_set = set(names)
+    for name in names_set:
+        if value.get(name) is not None:
+            return value[name]
+    for nested_name in ("result", "data", "metadata"):
+        nested = value.get(nested_name)
+        if isinstance(nested, Mapping):
+            found = _extract_protocol_field(nested, names_set)
+            if found is not None:
+                return found
+    return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _normalize_protocol_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    path = str(value).strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path or None
+
+
+def _normalize_protocol_hash(value: Any) -> str | None:
+    if value is None:
+        return None
+    expected_hash = str(value).strip()
+    return expected_hash or None
+
+
+def _is_production_path(path: str) -> bool:
+    normalized = _normalize_protocol_path(path) or ""
+    parts = normalized.lower().split("/")
+    filename = parts[-1] if parts else ""
+    return not (
+        "tests" in parts
+        or filename.startswith("test_")
+        or filename.endswith("_test.py")
+        or normalized.lower().endswith(".md")
+    )
 
 
 def _extract_path_hint(text: str) -> str | None:

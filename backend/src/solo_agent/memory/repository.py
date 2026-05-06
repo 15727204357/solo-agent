@@ -327,6 +327,16 @@ class SQLiteMemoryRepository:
         async with self._session_factory() as session:
             return await session.scalar(statement)
 
+    async def get_context_stats(self, session_id: str) -> dict[str, Any]:
+        """读取最近一次压缩写入的上下文统计信息。"""
+
+        summary = await self.get_latest_summary(session_id)
+        if summary is None:
+            return {}
+        metadata = dict(summary.metadata_ or {})
+        stats = metadata.get("context_stats")
+        return dict(stats) if isinstance(stats, dict) else metadata
+
     async def append_or_update_summary_snapshot(
         self,
         *,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from solo_agent.context import task_planner_instruction
+
 from .state import AgentState
 
 _MEMORY_FENCE_TAG_RE = re.compile(r"</?\s*memory-context\s*>", re.IGNORECASE)
@@ -67,6 +69,7 @@ def planner_user_prompt(
             memory_context_block or _format_conversation_context(conversation_context),
             skill_context_block,
             f"Current user task:\n{user_input}",
+            task_planner_instruction(),
             "The current user task above is authoritative. Return only the plan.",
         ]
     )

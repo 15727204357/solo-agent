@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     memory_search_limit: int = 5
     summary_trigger_messages: int = 8
     summary_max_tokens: int = 700
+    context_window_tokens: int = 128_000
+    context_regular_threshold: float = 0.80
+    context_long_task_threshold: float = 0.50
+    context_long_task_after_compressions: int = 2
+    context_tool_output_cutoff: int = 10
+    auxiliary_compression_provider: str = "ollama"
+    auxiliary_compression_model: str = "qwen3.5:4b"
+    auxiliary_compression_base_url: str = "http://localhost:11434"
     memory_enabled: bool = True
     conversation_history_enabled: bool = True
 

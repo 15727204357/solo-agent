@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from solo_agent.memory import MessageRole, init_sqlite_memory
 
 
