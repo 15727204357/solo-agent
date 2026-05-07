@@ -36,6 +36,7 @@ class AgentRunner:
                     settings.conversation_history_enabled,
                 )
             )
+            run_mode = str(run.metadata.get("run_mode", "agent"))
             agent_settings = AgentSettings(
                 provider=settings.provider,
                 workspace_root=settings.workspace_root,
@@ -67,6 +68,8 @@ class AgentRunner:
                 conversation_history_enabled=conversation_history_enabled,
                 verified_editing_enabled=settings.verified_editing_enabled,
                 patch_max_tokens=settings.patch_max_tokens,
+                run_mode=run_mode,
+                plan_deep_max_tokens=settings.plan_deep_max_tokens,
             )
             registry = create_default_registry(settings.workspace_root)
             provider = create_provider_from_settings(agent_settings)

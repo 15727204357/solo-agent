@@ -133,6 +133,18 @@ class ProtocolToolRegistry:
         return {"ok": True, "result": {"path": path, "expected_hash": expected_hash}}
 
 
+class AlwaysFailingToolRegistry:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def list_tools(self) -> list[dict[str, str]]:
+        return [{"name": "unstable_tool"}]
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        raise TimeoutError("unstable tool timed out")
+
+
 class TrackingPersistence:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -438,6 +450,40 @@ async def _run_with_proposed_tools(monkeypatch, calls, user_input: str, *, cutof
         )
     ]
     return events, registry
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_escalates_repeated_tool_exception_to_architectural(monkeypatch) -> None:
+    async def fake_propose_tool_calls(tool_registry, state, settings):
+        return [{"name": "unstable_tool", "arguments": {"target": "same"}}]
+
+    monkeypatch.setattr(graph_module, "_propose_tool_calls", fake_propose_tool_calls)
+    registry = AlwaysFailingToolRegistry()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-architectural",
+            "inspect the unstable tool",
+            deps=AgentDeps(provider=FakeProvider(), tool_registry=registry),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                max_tool_calls=1,
+                tool_call_cut_off=5,
+            ),
+        )
+    ]
+
+    error_events = [event for event in events if event.type == "error" and event.node == "execute_tools"]
+    retry_events = [event for event in events if event.type == "error_recovery_retry"]
+
+    assert len(registry.calls) == 3
+    assert len(retry_events) == 2
+    assert error_events[-1].data["category"] == "architectural"
+    assert error_events[-1].data["severity"] == "fatal"
+    assert error_events[-1].data["recoverable"] is False
 
 
 @pytest.mark.asyncio
@@ -894,3 +940,353 @@ async def test_agent_graph_can_disable_recent_history_only() -> None:
     assert "历史消息" not in planner_prompt
     assert "检索记忆" in planner_prompt
     assert any(event.type == "memory_loaded" for event in events)
+
+
+class DeepPlanProvider(FakeProvider):
+    """plan 模式的模拟提供者，返回深度计划内容。"""
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ProviderChunk]:
+        self.seen_messages.append(messages)
+        system = messages[0].content if messages else ""
+        if "deep planning mode" in system:
+            yield ProviderChunk(content="## Summary\nCreate a demo file with a focused test-first plan.\n\n")
+            yield ProviderChunk(
+                content=(
+                    "## File Map\n| File Path | Action | Purpose |\n"
+                    "|-----------|--------|---------|\n| a.py | CREATE | Demo module. |\n\n"
+                )
+            )
+            yield ProviderChunk(
+                content=(
+                    "## Steps\n"
+                    "1. Command: `New-Item -Path a.py -ItemType File`\n"
+                    "   Expected Output: PowerShell creates a.py.\n"
+                    "   Success Criteria: a.py exists at the workspace root.\n"
+                    "   Files Affected: a.py.\n\n"
+                    "## Verification\n`python -m pytest backend/tests/test_demo.py -q`\n\n"
+                    "## Execution Options\nSingle Agent is recommended because this touches one file.\n\n"
+                    "## Self-Review\nNo placeholders; all paths and commands are concrete.\n"
+                )
+            )
+        elif system.startswith("You are Solo Agent, a transparent"):
+            yield ProviderChunk(content="1. Inspect files\n2. Answer safely")
+        elif system.startswith("You are Solo Agent's plan quality reviewer"):
+            return
+        else:
+            yield ProviderChunk(content="Agent response.")
+
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        self.seen_messages.append(messages)
+        system = messages[0].content if messages else ""
+        if "plan quality reviewer" in system:
+            return '{"passed":true,"issues":[],"summary":"All checks passed."}'
+        return "用户偏好中文。"
+
+
+class RevisingDeepPlanProvider(DeepPlanProvider):
+    """Return a flawed first plan and a valid revision on the second plan call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deep_plan_calls = 0
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ProviderChunk]:
+        self.seen_messages.append(messages)
+        system = messages[0].content if messages else ""
+        if "deep planning mode" not in system:
+            yield ProviderChunk(content="Agent response.")
+            return
+
+        self.deep_plan_calls += 1
+        if self.deep_plan_calls == 1:
+            yield ProviderChunk(content="## Steps\n1. TODO: inspect the code and implement later.\n")
+            return
+
+        yield ProviderChunk(content="## Summary\nAdd a health endpoint through a fully specified plan.\n\n")
+        yield ProviderChunk(
+            content=(
+                "## File Map\n| File Path | Action | Purpose |\n"
+                "|-----------|--------|---------|\n"
+                "| backend/src/solo_agent/web/routes.py | MODIFY | Add the health endpoint behavior. |\n\n"
+            )
+        )
+        yield ProviderChunk(
+            content=(
+                "## Steps\n"
+                "1. Command: `python -m pytest backend/tests/test_web_api.py -q`\n"
+                "   Expected Output: The focused API tests fail before implementation.\n"
+                "   Success Criteria: The failure points to the missing endpoint behavior.\n"
+                "   Files Affected: backend/src/solo_agent/web/routes.py.\n\n"
+                "## Verification\n`python -m pytest backend/tests/test_web_api.py -q`\n\n"
+                "## Execution Options\nSingle Agent is recommended because the route change is small and sequential.\n\n"
+                "## Self-Review\nNo placeholders; every path, command, and expected result is concrete.\n"
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_produces_deep_plan_events() -> None:
+    provider = DeepPlanProvider()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "Build a user authentication module",
+            deps=AgentDeps(provider=provider),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                run_mode="plan",
+            ),
+        )
+    ]
+
+    event_types = [event.type for event in events]
+    assert "deep_plan_started" in event_types
+    assert "deep_plan_delta" in event_types
+    assert "plan_self_review_completed" in event_types
+    assert "plan_completed" in event_types
+    assert "run_completed" in event_types
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_revises_failed_plan_once_before_response() -> None:
+    provider = RevisingDeepPlanProvider()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "Plan a health check endpoint",
+            deps=AgentDeps(provider=provider),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                run_mode="plan",
+            ),
+        )
+    ]
+
+    assert provider.deep_plan_calls == 2
+    response = next(event for event in events if event.type == "response_completed")
+    assert "TODO" not in response.data["response"]
+    assert "backend/src/solo_agent/web/routes.py" in response.data["response"]
+    review = next(event for event in events if event.type == "plan_self_review_completed")
+    assert review.data["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_skips_tool_execution() -> None:
+    provider = DeepPlanProvider()
+    registry = HeuristicToolRegistry()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "Add a health check endpoint",
+            deps=AgentDeps(provider=provider, tool_registry=registry),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                run_mode="plan",
+            ),
+        )
+    ]
+
+    event_types = [event.type for event in events]
+    assert "tool_call_started" not in event_types
+    assert "plan_completed" in event_types
+    assert events[-1].type == "run_completed"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_skips_patch_proposal() -> None:
+    provider = DeepPlanProvider()
+    registry = HeuristicToolRegistry()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "Refactor the database layer",
+            deps=AgentDeps(provider=provider, tool_registry=registry),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                run_mode="plan",
+                verified_editing_enabled=True,
+            ),
+        )
+    ]
+
+    event_types = [event.type for event in events]
+    assert "patch_generation_started" not in event_types
+    assert "patch_proposed" not in event_types
+    assert events[-1].type == "run_completed"
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_unchanged() -> None:
+    provider = DeepPlanProvider()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "What is Python?",
+            deps=AgentDeps(provider=provider),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                run_mode="agent",
+            ),
+        )
+    ]
+
+    event_types = [event.type for event in events]
+    assert "plan_started" in event_types
+    assert "plan_completed" in event_types
+    assert "deep_plan_started" not in event_types
+    assert "deep_plan_delta" not in event_types
+    assert events[-1].type == "run_completed"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_with_memory() -> None:
+    persistence = TrackingPersistence()
+    provider = DeepPlanProvider()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "Analyze the project",
+            deps=AgentDeps(provider=provider, persistence=persistence),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                run_mode="plan",
+            ),
+        )
+    ]
+
+    assert "prefetch_all" in persistence.calls
+    assert any(event.type == "memory_loaded" for event in events)
+    assert any(event.type == "deep_plan_started" for event in events)
+    assert events[-1].type == "run_completed"
+
+
+# ---------------------------------------------------------------------------
+# 错误处理层：AgentState 新字段 + error 事件增强测试
+# ---------------------------------------------------------------------------
+
+
+class TestErrorStateFields:
+    """AgentState 新增错误追踪字段测试。"""
+
+    def test_default_values(self) -> None:
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        assert state.last_error == {}
+        assert state.retry_count == 0
+        assert state.error_classification == ""
+        assert state.compaction_attempts == 0
+
+    def test_snapshot_includes_error_fields(self) -> None:
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        state.last_error = {"error_code": "TIMEOUT", "category": "retryable", "message": "timeout", "stage": "tools"}
+        state.retry_count = 1
+        state.error_classification = "retryable"
+        state.compaction_attempts = 0
+
+        d = state.snapshot()
+        assert d["last_error"] == state.last_error
+        assert d["retry_count"] == 1
+        assert d["error_classification"] == "retryable"
+        assert d["compaction_attempts"] == 0
+
+    def test_retry_count_increment(self) -> None:
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        state.retry_count += 1
+        assert state.retry_count == 1
+        state.retry_count += 1
+        assert state.retry_count == 2
+
+    def test_compaction_attempts_increment(self) -> None:
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        state.compaction_attempts += 1
+        assert state.compaction_attempts == 1
+        state.compaction_attempts += 1
+        assert state.compaction_attempts == 2
+
+
+class TestEnhancedErrorEvent:
+    """增强的 error 事件包含 severity、recoverable、error_code。"""
+
+    def test_error_event_includes_enhanced_fields(self) -> None:
+        from solo_agent.agent.graph import _event as make_event
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        state.error_classification = "retryable"
+        state.last_error = {"error_code": "TIMEOUT", "category": "retryable", "message": "timeout", "stage": "tools"}
+
+        event = make_event(state, "error", "tools", "timeout", {"error_type": "TimeoutError"})
+        assert event.data["severity"] == "error"
+        assert event.data["recoverable"] is True
+        assert event.data["error_code"] == "TIMEOUT"
+
+    def test_fatal_error_event_severity(self) -> None:
+        from solo_agent.agent.graph import _event as make_event
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        state.error_classification = "fatal"
+        state.last_error = {"error_code": "PERMISSION_DENIED"}
+
+        event = make_event(state, "error", "tools", "permission denied", {"error_type": "PermissionError"})
+        assert event.data["severity"] == "fatal"
+        assert event.data["recoverable"] is False
+
+    def test_non_error_event_unchanged(self) -> None:
+        from solo_agent.agent.graph import _event as make_event
+        from solo_agent.agent.state import AgentState
+
+        state = AgentState(session_id="s", run_id="r", user_input="hi")
+        event = make_event(state, "plan_completed", "plan", "plan done")
+        # 非 error 事件不应注入额外字段
+        assert "severity" not in event.data
+        assert "recoverable" not in event.data

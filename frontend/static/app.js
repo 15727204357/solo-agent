@@ -36,6 +36,8 @@ const dom = {
   memoryRefresh: document.querySelector("#memory-refresh"),
   memoryList: document.querySelector("#memory-list"),
   memoryEntries: document.querySelector("#memory-entries"),
+  modeAgent: document.querySelector("#mode-agent"),
+  modePlan: document.querySelector("#mode-plan"),
 };
 
 const state = {
@@ -45,6 +47,7 @@ const state = {
   activeSession: null,
   activeRun: null,
   threadMessages: [],
+  runMode: "agent",
   monitorState: {
     stageEvents: 0,
     rawEvents: 0,
@@ -59,12 +62,15 @@ const state = {
 };
 
 const terminalTypes = new Set(["completed", "run_completed", "failed", "cancelled"]);
-const debugOnlyEvents = new Set(["plan_delta", "response_delta"]);
+const debugOnlyEvents = new Set(["plan_delta", "response_delta", "deep_plan_delta"]);
 const timelineEvents = new Set([
   "started",
   "run_started",
   "plan_started",
   "plan_completed",
+  "deep_plan_started",
+  "deep_plan_delta",
+  "plan_self_review_completed",
   "context_started",
   "context_completed",
   "inspect_started",
@@ -88,6 +94,9 @@ const stageByEvent = {
   plan_started: "plan",
   plan_delta: "plan",
   plan_completed: "plan",
+  deep_plan_started: "plan",
+  deep_plan_delta: "plan",
+  plan_self_review_completed: "plan",
   context_started: "context",
   context_completed: "context",
   inspect_started: "inspect",
@@ -109,6 +118,7 @@ const completedEvents = new Set([
   "started",
   "run_started",
   "plan_completed",
+  "plan_self_review_completed",
   "context_completed",
   "inspect_completed",
   "tool_call_completed",
@@ -715,6 +725,8 @@ function eventLabel(type) {
     run_started: "开始",
     plan_started: "规划中",
     plan_completed: "规划完成",
+    deep_plan_started: "深度规划",
+    plan_self_review_completed: "自检完成",
     context_started: "上下文",
     context_completed: "上下文完成",
     inspect_started: "安全检查",
@@ -792,6 +804,40 @@ function applyRunEvent(event) {
     dom.planSummary.textContent = data.plan;
     state.threadMessages.push(createMessage("plan", data.plan, "本次运行"));
     renderThread();
+  }
+
+  if (event.type === "deep_plan_started") {
+    if (!state.activeAssistantMessage) {
+      state.activeAssistantMessage = createMessage("plan", "", "深度计划流式输出");
+      state.threadMessages.push(state.activeAssistantMessage);
+      renderThread();
+    }
+  }
+
+  if (event.type === "deep_plan_delta") {
+    if (!state.activeAssistantMessage) {
+      state.activeAssistantMessage = createMessage("plan", "", "深度计划流式输出");
+      state.threadMessages.push(state.activeAssistantMessage);
+      renderThread();
+    }
+    appendMessageContent(state.activeAssistantMessage, event.message || "");
+    state.monitorState.planChars = (state.activeAssistantMessage.content || "").length;
+    dom.planCount.textContent = String(state.monitorState.planChars);
+    dom.planSummary.classList.remove("empty-state");
+    dom.planSummary.textContent = state.activeAssistantMessage.content;
+  }
+
+  if (event.type === "plan_self_review_completed") {
+    const reviewData = data.plan_quality_report || data;
+    const passed = reviewData.passed !== false;
+    const badge = document.createElement("span");
+    badge.className = `quality-badge ${passed ? "quality-pass" : "quality-fail"}`;
+    badge.textContent = passed ? "通过" : "有问题";
+    dom.planSummary.prepend(badge);
+    if (state.activeAssistantMessage) {
+      state.activeAssistantMessage.meta = passed ? "自检通过" : "自检发现问题";
+      renderThread();
+    }
   }
 
   if (event.type === "response_started" && !state.activeAssistantMessage) {
@@ -876,6 +922,21 @@ function newSessionView() {
   renderWorkspaces();
 }
 
+function setRunMode(mode) {
+  state.runMode = mode;
+  if (mode === "agent") {
+    dom.modeAgent.classList.add("active");
+    dom.modeAgent.setAttribute("aria-checked", "true");
+    dom.modePlan.classList.remove("active");
+    dom.modePlan.setAttribute("aria-checked", "false");
+  } else {
+    dom.modePlan.classList.add("active");
+    dom.modePlan.setAttribute("aria-checked", "true");
+    dom.modeAgent.classList.remove("active");
+    dom.modeAgent.setAttribute("aria-checked", "false");
+  }
+}
+
 async function submitRun(event) {
   event.preventDefault();
   const data = new FormData(dom.form);
@@ -908,7 +969,7 @@ async function submitRun(event) {
     updateThreadHeader();
     renderWorkspaces();
 
-    const run = await postJson(`/api/sessions/${session.id}/runs`, { prompt });
+    const run = await postJson(`/api/sessions/${session.id}/runs`, { prompt, run_mode: state.runMode });
     dom.form.reset();
     if (workspacePath) {
       dom.workspacePath.value = workspacePath;
@@ -978,6 +1039,8 @@ dom.newSession.addEventListener("click", newSessionView);
 dom.clearThread.addEventListener("click", newSessionView);
 dom.folderPicker.addEventListener("click", chooseFolder);
 dom.memoryRefresh?.addEventListener("click", loadMemoryInbox);
+dom.modeAgent?.addEventListener("click", () => setRunMode("agent"));
+dom.modePlan?.addEventListener("click", () => setRunMode("plan"));
 
 resetMonitor();
 renderThread();

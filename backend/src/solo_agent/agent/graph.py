@@ -12,11 +12,15 @@ from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequ
 
 from .deps import AgentDeps, AgentSettings
 from .events import AgentEvent
+from .planning import PlanQualityIssue, PlanQualityReport, validate_plan_text
 from .policy import BehaviorPolicy, tool_result_ok
 from .prompts import (
     PATCH_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
     RESPONDER_SYSTEM_PROMPT,
+    build_deep_plan_messages,
+    build_deep_plan_revision_messages,
+    build_deep_plan_self_review_messages,
     build_memory_context_block,
     build_skill_context_block,
     patch_user_prompt,
@@ -101,6 +105,7 @@ async def run_agent_events(
     settings = settings or deps.settings or AgentSettings()
     provider = deps.provider or create_provider_from_settings(settings)
     state = AgentState(session_id=session_id, run_id=run_id, user_input=user_input)
+    _BEHAVIOR_POLICY.start_error_run(run_id)
 
     try:
         await _persist(deps.persistence, "start_run", state)
@@ -119,6 +124,8 @@ async def run_agent_events(
             state,
             status="awaiting_approval" if state.awaiting_approval else "completed",
         )
+    finally:
+        _BEHAVIOR_POLICY.finish_error_run(run_id)
 
 
 async def _run_graph(
@@ -146,6 +153,11 @@ async def _run_graph(
 
     async for event in _context_guard_stage(state, provider, deps, settings, phase="before_plan"):
         yield event
+
+    if state.run_mode == "plan":
+        async for event in _plan_mode_path(state, provider, deps, settings):
+            yield event
+        return
 
     async for event in _plan_node(state, provider, settings):
         yield event
@@ -210,6 +222,7 @@ async def _receive_user_turn_stage(
     settings: AgentSettings | Mapping[str, Any],
 ) -> AsyncIterator[AgentEvent]:
     state.loop_stage = "receive_user_turn"
+    state.run_mode = str(_setting(settings, "run_mode", "agent"))
     state.memory_enabled = bool(_setting(settings, "memory_enabled", True))
     state.conversation_history_enabled = bool(
         _setting(settings, "conversation_history_enabled", True)
@@ -240,6 +253,7 @@ async def _receive_user_turn_stage(
         "receive_user_turn",
         "Received user turn",
         {
+            "run_mode": state.run_mode,
             "memory_enabled": state.memory_enabled,
             "conversation_history_enabled": state.conversation_history_enabled,
             "tool_budget": state.snapshots["tool_budget"],
@@ -278,6 +292,234 @@ async def _plan_node(
     state.plan = "".join(parts).strip()
     state.snapshots["plan"] = state.plan
     yield _event(state, "plan_completed", "plan", "Plan completed", {"plan": state.plan})
+
+
+async def _deep_plan_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """plan 模式：生成 Superpowers 风格的深度实施计划。"""
+    state.loop_stage = "deep_plan"
+    yield _event(state, "deep_plan_started", "deep_plan", "Generating deep implementation plan")
+
+    messages = build_deep_plan_messages(
+        user_input=state.user_input,
+        memory_context_block=state.memory_context_block,
+        skill_context_block=state.skill_context_block,
+        conversation_context=state.conversation_context,
+    )
+    chat_messages = [ChatMessage(role=m["role"], content=m["content"]) for m in messages]
+
+    parts: list[str] = []
+    deep_max_tokens = int(_setting(settings, "plan_deep_max_tokens", 6000))
+    async for chunk in provider.stream_chat(
+        chat_messages,
+        temperature=float(_setting(settings, "temperature", 0.2)),
+        max_tokens=deep_max_tokens,
+    ):
+        if chunk.content:
+            parts.append(chunk.content)
+            yield _event(state, "deep_plan_delta", "deep_plan", chunk.content)
+
+    state.deep_plan = "".join(parts).strip()
+    state.plan = state.deep_plan
+    state.snapshots["deep_plan"] = state.deep_plan
+    state.snapshots["plan"] = state.plan
+    yield _event(
+        state,
+        "deep_plan_generation_completed",
+        "deep_plan",
+        "Deep plan generation completed",
+        {"deep_plan_chars": len(state.deep_plan)},
+    )
+
+
+async def _deep_plan_revision_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+    quality_report: PlanQualityReport,
+) -> AsyncIterator[AgentEvent]:
+    """plan 模式：如果确定性质量门失败，生成一次完整修正版计划。"""
+    state.loop_stage = "deep_plan_revision"
+    report_dict = quality_report.to_dict()
+    yield _event(
+        state,
+        "deep_plan_revision_started",
+        "deep_plan",
+        "Revising deep plan after quality validation",
+        report_dict,
+    )
+
+    messages = build_deep_plan_revision_messages(
+        user_input=state.user_input,
+        plan_text=state.deep_plan,
+        quality_report=report_dict,
+        memory_context_block=state.memory_context_block,
+        skill_context_block=state.skill_context_block,
+        conversation_context=state.conversation_context,
+    )
+    chat_messages = [ChatMessage(role=m["role"], content=m["content"]) for m in messages]
+
+    parts: list[str] = []
+    deep_max_tokens = int(_setting(settings, "plan_deep_max_tokens", 6000))
+    async for chunk in provider.stream_chat(
+        chat_messages,
+        temperature=float(_setting(settings, "temperature", 0.2)),
+        max_tokens=deep_max_tokens,
+    ):
+        if chunk.content:
+            parts.append(chunk.content)
+            yield _event(state, "deep_plan_delta", "deep_plan", chunk.content)
+
+    revised = "".join(parts).strip()
+    if revised:
+        state.deep_plan = revised
+        state.plan = revised
+        state.snapshots["deep_plan"] = revised
+        state.snapshots["plan"] = revised
+    yield _event(
+        state,
+        "deep_plan_revision_completed",
+        "deep_plan",
+        "Deep plan revision completed",
+        {"deep_plan_chars": len(state.deep_plan)},
+    )
+
+
+async def _plan_self_review_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """plan 模式：模型自检生成计划的质量。"""
+    state.loop_stage = "plan_self_review"
+    yield _event(
+        state,
+        "self_review_started",
+        "plan_self_review",
+        "Reviewing plan quality",
+    )
+
+    validation_report = validate_plan_text(state.deep_plan)
+
+    # LLM 自检
+    review_messages_raw = build_deep_plan_self_review_messages(state.deep_plan)
+    review_messages = [
+        ChatMessage(role=m["role"], content=m["content"]) for m in review_messages_raw
+    ]
+    try:
+        raw_review = await provider.complete(
+            review_messages,
+            temperature=float(_setting(settings, "temperature", 0.1)),
+            max_tokens=int(_setting(settings, "plan_deep_max_tokens", 6000) // 2),
+        )
+        import json as _json
+
+        review_data = _json.loads(raw_review) if isinstance(raw_review, str) else raw_review
+    except Exception:
+        review_data = {"passed": True, "issues": [], "summary": "LLM self-review unavailable; deterministic checks applied."}
+
+    llm_issues = review_data.get("issues", []) if isinstance(review_data, dict) else []
+    for llm_issue in llm_issues:
+        if isinstance(llm_issue, dict):
+            validation_report.add_issue(
+                PlanQualityIssue(
+                    type=str(llm_issue.get("type") or "llm_review"),
+                    message=str(llm_issue.get("message") or "LLM self-review reported a plan quality issue."),
+                    location=str(llm_issue.get("location") or "LLM self-review"),
+                )
+            )
+    combined_summary = review_data.get("summary", "") if isinstance(review_data, dict) else ""
+
+    report_dict = validation_report.to_dict()
+    report_dict["llm_self_review"] = review_data
+    state.plan_quality_report = report_dict
+    state.snapshots["plan_quality_report"] = report_dict
+
+    yield _event(
+        state,
+        "plan_self_review_completed",
+        "plan_self_review",
+        combined_summary or validation_report.summary,
+        report_dict,
+    )
+
+
+async def _plan_mode_path(
+    state: AgentState,
+    provider: ChatProvider,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """plan 模式执行路径：深度计划 → 自检 → 响应 → 持久化。"""
+
+    async for event in _deep_plan_stage(state, provider, settings):
+        yield event
+
+    initial_report = validate_plan_text(state.deep_plan)
+    if not initial_report.passed:
+        async for event in _deep_plan_revision_stage(state, provider, settings, initial_report):
+            yield event
+
+    async for event in _plan_self_review_stage(state, provider, settings):
+        yield event
+
+    yield _event(
+        state,
+        "plan_completed",
+        "deep_plan",
+        "Deep plan completed",
+        {"plan": state.plan, "deep_plan": state.deep_plan, "plan_quality_report": state.plan_quality_report},
+    )
+
+    state.response = _format_plan_mode_response(state.deep_plan, state.plan_quality_report)
+    state.snapshots["response"] = state.response
+    yield _event(
+        state,
+        "response_completed",
+        "respond",
+        "Plan mode response (deep plan)",
+        {"response": state.response},
+    )
+
+    if state.memory_enabled:
+        async for event in _sync_memory_stage(state, deps):
+            yield event
+        async for event in _queue_prefetch_stage(state, deps, settings):
+            yield event
+
+    async for event in _persist_snapshot_stage(state):
+        yield event
+
+    state.loop_stage = "finish"
+    yield _event(state, "run_completed", "end", "Plan mode run completed", state.snapshot())
+
+
+def _format_plan_mode_response(plan_text: str, quality_report: Mapping[str, Any]) -> str:
+    """Return the plan plus a compact quality report for plan-mode responses."""
+
+    summary = str(quality_report.get("summary") or "Plan quality report unavailable.")
+    passed = bool(quality_report.get("passed", False))
+    issues = quality_report.get("issues") or []
+    lines = [
+        plan_text,
+        "",
+        "## Plan Quality Report",
+        f"- Passed: {passed}",
+        f"- Summary: {summary}",
+    ]
+    if isinstance(issues, list) and issues:
+        lines.append("- Issues:")
+        for issue in issues:
+            if isinstance(issue, Mapping):
+                issue_type = issue.get("type", "issue")
+                message = issue.get("message", "")
+                location = issue.get("location", "")
+                location_text = f" ({location})" if location else ""
+                lines.append(f"  - {issue_type}: {message}{location_text}")
+    return "\n".join(lines).strip()
 
 
 async def _skip_memory_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
@@ -734,7 +976,64 @@ async def _execute_tools_node(
             f"Executing tool {name}",
             {"name": name, "status": "executing"},
         )
-        raw_result = await _call_tool(deps.tool_registry, name, arguments)
+        # 错误恢复：包裹工具调用
+        try:
+            raw_result = await _call_tool(deps.tool_registry, name, arguments)
+        except Exception as exc:
+            classification = _BEHAVIOR_POLICY.classify_error(
+                exc,
+                stage="tools",
+                attempt_count=state.retry_count,
+                run_id=state.run_id,
+            )
+            should_retry, reason = _BEHAVIOR_POLICY.should_retry(classification, state.retry_count)
+            state.last_error = classification.to_dict()
+            state.error_classification = classification.category
+
+            if should_retry:
+                state.retry_count += 1
+                fix_prompt = _BEHAVIOR_POLICY.build_fix_prompt(classification)
+                if fix_prompt:
+                    state.context.append({"source": "error_recovery", "content": fix_prompt})
+                yield _event(
+                    state,
+                    "error_recovery_retry",
+                    "execute_tools",
+                    f"Tool {name} 失败，将重试 ({reason})",
+                    {
+                        "name": name,
+                        "error_code": classification.error_code,
+                        "category": classification.category,
+                        "retry_count": state.retry_count,
+                        "reason": reason,
+                    },
+                )
+                pending.insert(index, dict(call))
+                continue
+
+            # 致命错误：终止运行
+            yield _event(
+                state,
+                "error",
+                "execute_tools",
+                f"Tool {name} 失败：{reason}",
+                {
+                    "error_type": type(exc).__name__,
+                    "error_code": classification.error_code,
+                    "category": classification.category,
+                },
+            )
+            state.blocked = True
+            state.block_reason = f"错误恢复失败: {reason}"
+            yield _event(
+                state,
+                "run_completed",
+                "end",
+                f"Agent run terminated due to {classification.category} error",
+                {"blocked": True, "reason": state.block_reason},
+            )
+            return
+
         raw_result_ok = tool_result_ok(raw_result)
         result, output_metadata = _truncate_tool_result(raw_result, output_max_bytes)
         yield _event(
@@ -1138,6 +1437,35 @@ async def _context_guard_stage(
         )
         result = await manager.maybe_compress(state, estimator=estimator, force=force_compress)
     except Exception as exc:
+        state.compaction_attempts += 1
+        classification = _BEHAVIOR_POLICY.classify_error(
+            exc,
+            stage="context_guard",
+            attempt_count=state.compaction_attempts,
+            run_id=state.run_id,
+        )
+        state.last_error = classification.to_dict()
+        state.error_classification = classification.category
+
+        # max_compaction_attempts=2，第三次触发 architectural
+        if classification.category == "architectural":
+            state.summary_status = "failed"
+            yield _event(
+                state,
+                "error",
+                "context",
+                f"上下文压缩连续失败 {state.compaction_attempts} 次，判定为架构问题",
+                {
+                    "phase": phase,
+                    "compaction_attempts": state.compaction_attempts,
+                    "error_code": classification.error_code,
+                    "category": "architectural",
+                },
+            )
+            state.blocked = True
+            state.block_reason = f"上下文压缩架构问题 (compaction_attempts={state.compaction_attempts})"
+            return
+
         try:
             result = await _fallback_main_compression(state, provider, settings, estimator, exc)
         except Exception as fallback_error:
@@ -1701,13 +2029,20 @@ def _event(
     message: str = "",
     data: dict[str, Any] | None = None,
 ) -> AgentEvent:
+    data = data or {}
+    # 增强 error 事件：注入错误分类信息
+    if event_type == "error":
+        classification = state.error_classification or "fatal"
+        data.setdefault("severity", "fatal" if classification in ("fatal", "architectural") else "error")
+        data.setdefault("recoverable", classification in ("retryable", "fixable"))
+        data.setdefault("error_code", state.last_error.get("error_code", "UNKNOWN_ERROR"))
     return AgentEvent(
         type=event_type,
         session_id=state.session_id,
         run_id=state.run_id,
         node=node,
         message=message,
-        data=data or {},
+        data=data,
     )
 
 

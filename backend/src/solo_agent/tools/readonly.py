@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import re
 import subprocess
+import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -364,7 +365,7 @@ class WorkspaceTools:
         if target:
             command_args.append(self._relative(self._resolve_command_target(target)))
         return self._run_allowed_command(
-            ["uv", "run", "--extra", "dev", "python", "-m", "pytest", *command_args],
+            [*self._pytest_base_command(), *command_args],
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
         )
@@ -471,12 +472,17 @@ class WorkspaceTools:
     ) -> dict[str, Any]:
         pytest_target = self._resolve_pytest_target(target)
         result = self._run_allowed_command(
-            ["uv", "run", "--extra", "dev", "python", "-m", "pytest", "-q", pytest_target],
+            [*self._pytest_base_command(), "-q", pytest_target],
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
         )
         result["failures"] = _parse_pytest_failures(str(result.get("output", "")))
         return result
+
+    def _pytest_base_command(self) -> list[str]:
+        if (self.workspace_root / "pyproject.toml").exists():
+            return ["uv", "run", "--extra", "dev", "python", "-m", "pytest"]
+        return [sys.executable, "-m", "pytest"]
 
     def list_skills(
         self,

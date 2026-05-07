@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     conversation_history_enabled: bool = True
     verified_editing_enabled: bool = True
     patch_max_tokens: int = 1400
+    plan_deep_max_tokens: int = 6000
 
     @field_validator("workspace_root")
     @classmethod

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
-from solo_agent.inspectors import SecurityInspector, ToolCall
+from solo_agent.inspectors import RepetitionInspector, SecurityInspector, ToolCall
 from solo_agent.tools import create_default_registry
 
 
@@ -26,6 +27,23 @@ def test_security_inspector_blocks_unknown_tool() -> None:
 
     assert not result.allowed
     assert result.code == "tool_not_allowed"
+
+
+def test_default_registry_blocks_repeated_identical_tool_call(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    registry = create_default_registry(tmp_path)
+
+    assert any(isinstance(inspector, RepetitionInspector) for inspector in registry.inspectors)
+
+    arguments = {"path": ".", "max_entries": 5}
+    assert registry.call("list_files", arguments)["ok"] is True
+    assert registry.call("list_files", arguments)["ok"] is True
+    assert registry.call("list_files", arguments)["ok"] is True
+    blocked = registry.call("list_files", arguments)
+
+    assert blocked["ok"] is False
+    assert blocked["code"] == "repeated_tool_call"
+    assert blocked["metadata"]["tool"] == "list_files"
 
 
 def test_readonly_tools_stay_inside_workspace(tmp_path: Path) -> None:
@@ -219,11 +237,7 @@ def test_targeted_pytest_accepts_only_workspace_test_nodeids(tmp_path: Path, mon
 
     assert result["ok"] is True
     assert captured["command"] == [
-        "uv",
-        "run",
-        "--extra",
-        "dev",
-        "python",
+        sys.executable,
         "-m",
         "pytest",
         "-q",

@@ -484,6 +484,64 @@ label {
   margin-bottom: 12px;
 }
 
+.run-mode-selector {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  width: fit-content;
+}
+
+.mode-segment {
+  min-height: 32px;
+  border: none;
+  border-radius: 0;
+  padding: 0 16px;
+  color: var(--muted);
+  background: var(--panel);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-segment:not(:last-child) {
+  border-right: 1px solid var(--line-strong);
+}
+
+.mode-segment:hover {
+  background: var(--panel-soft);
+}
+
+.mode-segment.active {
+  color: #fff;
+  background: var(--accent);
+}
+
+.quality-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 10px;
+  margin-right: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  float: right;
+}
+
+.quality-pass {
+  color: var(--accent);
+  background: var(--green-soft);
+}
+
+.quality-fail {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
 .prompt-form {
   display: grid;
   grid-template-columns: minmax(210px, 0.32fr) minmax(0, 0.68fr);

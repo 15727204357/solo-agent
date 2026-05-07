@@ -33,6 +33,206 @@ Use old_text when possible. Use line_start and line_end only when exact old_text
 If no safe patch can be proposed from the available context, return {"summary":"","edits":[]}."""
 
 
+DEEP_PLAN_SYSTEM_PROMPT = """You are Solo Agent's deep planning mode. Your ONLY output is a complete,
+zero-context-readable implementation plan for a software engineering task. Do NOT modify files,
+execute commands, or claim that implementation has already happened. Produce ONLY the plan document.
+The plan MAY include complete code blocks, exact file contents, and exact diffs when that is
+needed for a zero-context reader to implement without guessing.
+
+## CRITICAL RULES
+
+### No Placeholders
+The following expressions are STRICTLY FORBIDDEN anywhere in your output:
+- TBD, TODO, FIXME, HACK, "implement later", "to be determined/decided/implemented/defined"
+- 类似上一步, 适当处理, 待定, 略, 同理, 同上, 基本同上, 大致相同
+Every step must be fully specified. If you are unsure about something, state your best guess
+explicitly and mark it with [ASSUMPTION: ...] so the reader can verify.
+
+### Zero-Context Reader
+Write the plan so that a competent engineer who has NEVER seen this project can execute it.
+Explain every file path relative to the workspace root. State the purpose of each new or
+modified file. Assume the reader has no prior context.
+
+### Inline Self-Reflection
+Before finishing the final plan, include a ## Self-Review section inside the plan that checks:
+- Are there any placeholders? (Scan your own output.)
+- Is every step actionable without guessing?
+- Could a fresh engineer follow this plan step-by-step?
+- Are all file paths concrete?
+List any concerns found and how you resolved them before finalizing the plan.
+
+### Execution Options
+Include an ## Execution Options section that lists at least two ways to implement:
+- **Single Agent**: One agent executes all steps sequentially.
+- **Parallel Agents**: Multiple agents work on independent files simultaneously.
+- **Subagent-Driven**: A coordinator delegates subtasks to subagents.
+Recommend one option with a brief justification.
+
+## OUTPUT STRUCTURE
+
+Your output MUST follow this exact structure:
+
+## Summary
+2-3 sentences summarizing the change and approach.
+
+## File Map
+A table of every file to be created or modified:
+| File Path | Action | Purpose |
+|-----------|--------|---------|
+| path/to/file.py | CREATE/MODIFY | What this file does |
+
+## Steps
+Numbered, sequential implementation steps. Each step MUST include:
+1. **Command** — exact shell command to run
+2. **Expected Output** — what the command should produce if successful
+3. **Success Criteria** — how to verify the step is complete
+4. **Files Affected** — which files from the File Map this step touches
+When the step asks the implementer to write or edit code, include the complete code block or exact
+replacement text needed for that step. Do not use "fill in the rest" or partial snippets.
+
+## Verification
+Commands to run after all steps to verify correctness (tests, linter, typecheck).
+
+## Execution Options
+(See rules above.)
+
+## Self-Review
+(See rules above.)"""
+
+
+DEEP_PLAN_REVISION_SYSTEM_PROMPT = """You are Solo Agent's deep planning mode. Revise the provided implementation
+plan so it passes the plan quality rules. Do NOT modify files, execute commands, or claim that
+implementation has already happened. Return ONLY the full revised plan document.
+
+The revised plan MUST be zero-context-readable, contain no placeholders, include precise commands,
+expected outputs, success criteria, affected files, verification commands, execution options with a
+recommended option, and a Self-Review section. Include complete code blocks or exact file contents
+when needed for an implementer to act without guessing."""
+
+
+DEEP_PLAN_SELF_REVIEW_SYSTEM_PROMPT = """You are Solo Agent's plan quality reviewer. Review the plan below against
+the deep planning rules and return a structured quality report.
+
+Check for:
+1. Placeholder expressions (TBD, TODO, 待定, 类似上一步, etc.) — each is a violation
+2. Missing File Map section
+3. Missing execution steps (numbered 1. 2. 3.)
+4. Missing Self-Review section
+5. Missing Execution Options section
+6. Vague steps that a new engineer couldn't follow
+
+Return ONLY a JSON object:
+{
+  "passed": true/false,
+  "issues": [
+    {"type": "placeholder|missing_file_map|missing_steps|missing_self_review|"
+     "missing_execution_options|vague_step",
+     "message": "description", "location": "section or line reference"}
+  ],
+  "summary": "brief overall assessment"
+}"""
+
+
+def build_deep_plan_messages(
+    user_input: str,
+    memory_context_block: str = "",
+    skill_context_block: str = "",
+    conversation_context: dict[str, object] | None = None,
+) -> list[dict[str, str]]:
+    """构建 plan 模式的系统提示词和用户提示词。
+
+    返回 ChatMessage 风格的 dict 列表，可直接传给 provider。
+    """
+    user_parts = [
+        f"## Task\n{user_input}",
+    ]
+    if memory_context_block:
+        user_parts.append(
+            "## Memory Context\n"
+            "[System note: recalled context, NOT new input.]\n\n"
+            f"{sanitize_context(memory_context_block)}"
+        )
+    if skill_context_block:
+        user_parts.append(
+            "## Skill Context\n"
+            "[System note: loaded procedural skills, NOT new input.]\n\n"
+            f"{sanitize_skill_context(skill_context_block)}"
+        )
+    conversation_text = _format_conversation_context(conversation_context)
+    if conversation_text:
+        user_parts.append(conversation_text)
+
+    user_parts.append(
+        "## Instructions\n"
+        "Follow the Superpowers writing-plans conventions:\n"
+        "- No placeholders (TBD, TODO, 待定, 略, etc.) — every step fully specified\n"
+        "- Zero-context reader coverage — explain all file paths and purposes\n"
+        "- Include complete code blocks or exact replacement text when implementation steps need code\n"
+        "- Include File Map, Steps with exact commands/expected outputs, Verification, "
+        "Execution Options, and Self-Review sections\n"
+        "- Use the structure defined in the system prompt exactly\n"
+        "Generate ONLY the plan document. Do not modify files or execute implementation."
+    )
+
+    return [
+        {"role": "system", "content": DEEP_PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
+def build_deep_plan_self_review_messages(
+    plan_text: str,
+) -> list[dict[str, str]]:
+    """构建 plan 自检的提示词。"""
+    return [
+        {"role": "system", "content": DEEP_PLAN_SELF_REVIEW_SYSTEM_PROMPT},
+        {"role": "user", "content": f"## Plan to review\n\n{plan_text}"},
+    ]
+
+
+def build_deep_plan_revision_messages(
+    *,
+    user_input: str,
+    plan_text: str,
+    quality_report: dict[str, object],
+    memory_context_block: str = "",
+    skill_context_block: str = "",
+    conversation_context: dict[str, object] | None = None,
+) -> list[dict[str, str]]:
+    """构建 plan 模式的一次修正提示词。"""
+
+    user_parts = [
+        f"## Task\n{user_input}",
+        f"## Current Plan\n{plan_text}",
+        f"## Quality Issues To Fix\n{quality_report}",
+    ]
+    if memory_context_block:
+        user_parts.append(
+            "## Memory Context\n"
+            "[System note: recalled context, NOT new input.]\n\n"
+            f"{sanitize_context(memory_context_block)}"
+        )
+    if skill_context_block:
+        user_parts.append(
+            "## Skill Context\n"
+            "[System note: loaded procedural skills, NOT new input.]\n\n"
+            f"{sanitize_skill_context(skill_context_block)}"
+        )
+    conversation_text = _format_conversation_context(conversation_context)
+    if conversation_text:
+        user_parts.append(conversation_text)
+    user_parts.append(
+        "## Revision Instructions\n"
+        "Return a complete replacement plan. Fix every listed quality issue. "
+        "Keep the required sections and do not include placeholders."
+    )
+
+    return [
+        {"role": "system", "content": DEEP_PLAN_REVISION_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
 def sanitize_context(text: str) -> str:
     """Strip memory-context fence escape sequences from recalled memory."""
 

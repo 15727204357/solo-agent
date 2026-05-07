@@ -39,6 +39,8 @@ class AgentSettings:
     conversation_history_enabled: bool = True
     verified_editing_enabled: bool = False
     patch_max_tokens: int = 1400
+    run_mode: str = "agent"
+    plan_deep_max_tokens: int = 6000
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
 

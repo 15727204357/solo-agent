@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from solo_agent.memory import MemoryGovernanceError
 from solo_agent.settings import Settings, get_settings
@@ -35,6 +35,7 @@ class CreateRunRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     memory_enabled: bool | None = None
     conversation_history_enabled: bool | None = None
+    run_mode: Literal["agent", "plan"] | None = None
 
 
 class UpdateMemoryCandidateRequest(BaseModel):
@@ -68,7 +69,10 @@ async def parse_body(request: Request, model: type[BaseModel]) -> BaseModel:
     else:
         form = await request.form()
         data = dict(form)
-    return model.model_validate(data)
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -282,6 +286,7 @@ async def create_run(
         metadata={
             "memory_enabled": memory_enabled,
             "conversation_history_enabled": conversation_history_enabled,
+            "run_mode": body.run_mode or "agent",
         },
     )
     background_tasks.add_task(runner.run, session_id, run.id)

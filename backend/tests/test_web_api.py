@@ -189,3 +189,74 @@ def _proposal(session_id: str, run_id: str) -> PatchProposal:
             )
         ],
     )
+
+
+def test_web_api_run_mode_defaults_to_agent() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Mode Test"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "hello"},
+        )
+
+    assert run.status_code == 202
+    assert run.json()["metadata"]["run_mode"] == "agent"
+
+
+def test_web_api_run_mode_explicit_plan() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Plan Mode Test"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "design a feature", "run_mode": "plan"},
+        )
+
+    assert run.status_code == 202
+    assert run.json()["metadata"]["run_mode"] == "plan"
+
+
+def test_web_api_run_mode_explicit_agent() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Agent Mode Test"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "fix bug", "run_mode": "agent"},
+        )
+
+    assert run.status_code == 202
+    assert run.json()["metadata"]["run_mode"] == "agent"
+
+
+def test_web_api_run_mode_invalid_rejected() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Invalid Mode"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "something", "run_mode": "invalid"},
+        )
+
+    assert run.status_code == 422

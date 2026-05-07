@@ -19,11 +19,14 @@ class AgentState:
     run_id: str
     user_input: str
     loop_stage: str = "initialized"
+    run_mode: str = "agent"
     memory_enabled: bool = True
     conversation_history_enabled: bool = True
     memory_budget: dict[str, Any] = field(default_factory=dict)
     summary_status: str = "not_started"
     plan: str = ""
+    deep_plan: str = ""
+    plan_quality_report: dict[str, Any] = field(default_factory=dict)
     conversation_context: dict[str, Any] = field(default_factory=dict)
     memory_context_block: str = ""
     memory_warnings: list[str] = field(default_factory=list)
@@ -39,6 +42,11 @@ class AgentState:
     blocked: bool = False
     block_reason: str | None = None
     snapshots: dict[str, Any] = field(default_factory=dict)
+    # 错误处理层新增字段
+    last_error: dict[str, Any] = field(default_factory=dict)
+    retry_count: int = 0
+    error_classification: str = ""
+    compaction_attempts: int = 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -46,11 +54,14 @@ class AgentState:
             "run_id": self.run_id,
             "user_input": self.user_input,
             "loop_stage": self.loop_stage,
+            "run_mode": self.run_mode,
             "memory_enabled": self.memory_enabled,
             "conversation_history_enabled": self.conversation_history_enabled,
             "memory_budget": self.memory_budget,
             "summary_status": self.summary_status,
             "plan": self.plan,
+            "deep_plan": self.deep_plan,
+            "plan_quality_report": self.plan_quality_report,
             "conversation_context": self.conversation_context,
             "memory_context_block": self.memory_context_block,
             "memory_warnings": self.memory_warnings,
@@ -75,4 +86,9 @@ class AgentState:
             "blocked": self.blocked,
             "block_reason": self.block_reason,
             "snapshots": self.snapshots,
+            # 错误处理层新增字段
+            "last_error": self.last_error,
+            "retry_count": self.retry_count,
+            "error_classification": self.error_classification,
+            "compaction_attempts": self.compaction_attempts,
         }
