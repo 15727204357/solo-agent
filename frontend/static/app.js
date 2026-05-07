@@ -31,6 +31,11 @@ const dom = {
   rawCount: document.querySelector("#raw-count"),
   latestPayload: document.querySelector("#latest-payload"),
   rawEvents: document.querySelector("#raw-events"),
+  memoryCount: document.querySelector("#memory-count"),
+  memoryStatus: document.querySelector("#memory-status"),
+  memoryRefresh: document.querySelector("#memory-refresh"),
+  memoryList: document.querySelector("#memory-list"),
+  memoryEntries: document.querySelector("#memory-entries"),
 };
 
 const state = {
@@ -49,6 +54,8 @@ const state = {
   },
   currentSource: null,
   activeAssistantMessage: null,
+  memoryCandidates: [],
+  memoryEntries: [],
 };
 
 const terminalTypes = new Set(["completed", "run_completed", "failed", "cancelled"]);
@@ -149,6 +156,14 @@ async function requestJson(url, options = {}) {
 function postJson(url, body) {
   return requestJson(url, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function patchJson(url, body) {
+  return requestJson(url, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -307,6 +322,173 @@ function updateMessageContent(message, content) {
 
 function appendMessageContent(message, chunk) {
   updateMessageContent(message, `${message.content || ""}${chunk || ""}`);
+}
+
+function renderMemoryInbox() {
+  if (!dom.memoryList || !dom.memoryEntries) {
+    return;
+  }
+  dom.memoryList.replaceChildren();
+  dom.memoryEntries.replaceChildren();
+  dom.memoryCount.textContent = `${state.memoryCandidates.length} pending`;
+  dom.memoryStatus.textContent = state.memoryCandidates.length
+    ? "Review, edit, approve, or reject before memory is published."
+    : "No pending memory candidates.";
+
+  if (!state.memoryCandidates.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "Inbox is clear.";
+    dom.memoryList.append(empty);
+  } else {
+    state.memoryCandidates.forEach((candidate) => dom.memoryList.append(createMemoryCandidateNode(candidate)));
+  }
+
+  if (!state.memoryEntries.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No published memory entries yet.";
+    dom.memoryEntries.append(empty);
+  } else {
+    state.memoryEntries.forEach((entry) => dom.memoryEntries.append(createMemoryEntryNode(entry)));
+  }
+}
+
+function createMemoryCandidateNode(candidate) {
+  const card = document.createElement("article");
+  const header = document.createElement("div");
+  const title = document.createElement("strong");
+  const meta = document.createElement("span");
+  const textarea = document.createElement("textarea");
+  const details = document.createElement("p");
+  const actions = document.createElement("div");
+  const resolution = document.createElement("select");
+  const approve = document.createElement("button");
+  const reject = document.createElement("button");
+
+  card.className = "memory-candidate";
+  header.className = "memory-candidate-header";
+  title.textContent = `${candidate.target || "memory"} candidate`;
+  meta.textContent = `confidence ${Math.round(Number(candidate.confidence || 0) * 100)}%`;
+  textarea.value = candidate.content || "";
+  textarea.rows = candidate.target === "skill" ? 8 : 4;
+  details.className = "memory-candidate-details";
+  details.textContent = memoryCandidateDetails(candidate);
+  actions.className = "memory-candidate-actions";
+
+  ["add", "replace", "merge"].forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    resolution.append(option);
+  });
+  if (candidate.conflict_ids?.length) {
+    resolution.value = "replace";
+  }
+
+  approve.className = "primary-button";
+  approve.type = "button";
+  approve.textContent = "Approve";
+  approve.addEventListener("click", async () => {
+    approve.disabled = true;
+    try {
+      await postJson(`/api/memory/candidates/${candidate.id}/approve`, {
+        resolution: resolution.value,
+        content: textarea.value.trim(),
+      });
+      dom.memoryStatus.textContent = "Memory candidate approved.";
+      await loadMemoryInbox();
+    } catch (error) {
+      dom.memoryStatus.textContent = error.message;
+    } finally {
+      approve.disabled = false;
+    }
+  });
+
+  reject.className = "secondary-button";
+  reject.type = "button";
+  reject.textContent = "Reject";
+  reject.addEventListener("click", async () => {
+    reject.disabled = true;
+    try {
+      await postJson(`/api/memory/candidates/${candidate.id}/reject`, { reason: "rejected in inbox" });
+      dom.memoryStatus.textContent = "Memory candidate rejected.";
+      await loadMemoryInbox();
+    } catch (error) {
+      dom.memoryStatus.textContent = error.message;
+    } finally {
+      reject.disabled = false;
+    }
+  });
+
+  header.append(title, meta);
+  actions.append(resolution, approve, reject);
+  card.append(header, textarea, details, actions);
+  return card;
+}
+
+function createMemoryEntryNode(entry) {
+  const item = document.createElement("article");
+  const header = document.createElement("div");
+  const title = document.createElement("strong");
+  const status = document.createElement("span");
+  const content = document.createElement("p");
+  const revoke = document.createElement("button");
+
+  item.className = "memory-entry";
+  header.className = "memory-candidate-header";
+  title.textContent = entry.target || "memory";
+  status.textContent = entry.status || "active";
+  content.textContent = entry.content || "";
+  revoke.className = "secondary-button";
+  revoke.type = "button";
+  revoke.textContent = "Revoke";
+  revoke.addEventListener("click", async () => {
+    revoke.disabled = true;
+    try {
+      await postJson(`/api/memory/entries/${entry.id}/revoke`, { reason: "revoked in inbox" });
+      dom.memoryStatus.textContent = "Memory entry revoked.";
+      await loadMemoryInbox();
+    } catch (error) {
+      dom.memoryStatus.textContent = error.message;
+    } finally {
+      revoke.disabled = false;
+    }
+  });
+  header.append(title, status);
+  item.append(header, content, revoke);
+  return item;
+}
+
+function memoryCandidateDetails(candidate) {
+  const parts = [];
+  if (candidate.safety_flags?.length) {
+    parts.push(`flags: ${candidate.safety_flags.join(", ")}`);
+  }
+  if (candidate.conflict_ids?.length) {
+    parts.push(`conflicts: ${candidate.conflict_ids.length}`);
+  }
+  if (candidate.source_excerpt) {
+    parts.push(`source: ${String(candidate.source_excerpt).slice(0, 160)}`);
+  }
+  return parts.join(" | ") || "No warnings.";
+}
+
+async function loadMemoryInbox() {
+  if (!dom.memoryList) {
+    return;
+  }
+  try {
+    const [inbox, entries] = await Promise.all([
+      requestJson("/api/memory/inbox?status=pending&limit=50"),
+      requestJson("/api/memory/entries?limit=50"),
+    ]);
+    state.memoryCandidates = inbox.items || [];
+    state.memoryEntries = entries.items || [];
+    renderMemoryInbox();
+  } catch (error) {
+    dom.memoryStatus.textContent = error.message;
+  }
 }
 
 function renderWorkspaces() {
@@ -647,6 +829,7 @@ function applyRunEvent(event) {
     closeStream();
     state.activeAssistantMessage = null;
     loadSessions();
+    loadMemoryInbox();
   }
 }
 
@@ -794,9 +977,12 @@ dom.form.addEventListener("submit", submitRun);
 dom.newSession.addEventListener("click", newSessionView);
 dom.clearThread.addEventListener("click", newSessionView);
 dom.folderPicker.addEventListener("click", chooseFolder);
+dom.memoryRefresh?.addEventListener("click", loadMemoryInbox);
 
 resetMonitor();
 renderThread();
+renderMemoryInbox();
 setRunStatus("idle", "空闲");
 loadHealth();
 loadSessions();
+loadMemoryInbox();

@@ -9,7 +9,7 @@ import hashlib
 import re
 import subprocess
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -547,7 +547,7 @@ class WorkspaceTools:
             score = sum(1 for term in terms if term in haystack)
             if score:
                 scored.append({**skill, "score": score})
-        selected = sorted(scored, key=lambda item: (-item["score"], item["path"]))[:limit]
+        selected = sorted(scored, key=lambda item: (-item["score"], _skill_category_rank(item), item["path"]))[:limit]
         return {"skills": selected, "truncated": listed["truncated"]}
 
     def task_create(
@@ -1001,6 +1001,17 @@ def _skill_summary(skill_file: Path, text: str, root: Path) -> dict[str, Any]:
         "required_tools": frontmatter.get("required_tools", []),
         "path": skill_file.relative_to(root).as_posix(),
     }
+
+
+def _skill_category_rank(skill: Mapping[str, Any]) -> int:
+    category = str(skill.get("category", "")).lower()
+    if category == "behavior":
+        return 0
+    if category == "tools":
+        return 1
+    if category == "workflow":
+        return 2
+    return 3
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:

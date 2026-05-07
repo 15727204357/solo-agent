@@ -1,10 +1,10 @@
 # Solo Agent
 
-Solo Agent 是一个 Python 生态的 Web 版个人编程助手 MVP。它不是简单的聊天壳，而是一个可以写进简历的本地 Agent Runtime：有可观测的执行流程、受控工具调用、安全检查、Provider 抽象和 SQLite 持久化。
+Solo Agent 是一个 Python 生态的 Web 版个人编程助手。它不是简单的聊天壳，而是一个可以写进简历的本地 Agent Runtime：有可观测的执行流程、受控工具调用、graph 层行为策略、安全检查、Provider 抽象和 SQLite 持久化。
 
-第一版目标是先做出一个能运行、能演示、能继续扩展的闭环：
+当前目标是做出一个能运行、能演示、能继续扩展，并能真实受控执行的闭环：
 
-用户在 Web 页面输入编程任务，后端启动 Agent，Agent 依次完成规划、上下文收集、安全检查、只读工具调用、流式回复和持久化记录。
+用户在 Web 页面输入编程任务，后端启动 Agent，Agent 依次完成规划、上下文收集、安全检查、行为策略评估、受控工具调用、流式回复和持久化记录。
 
 ## 核心能力
 
@@ -16,7 +16,8 @@ Solo Agent 是一个 Python 生态的 Web 版个人编程助手 MVP。它不是�
 - `Hermes 风格记忆周期`：调用前 `prefetch_all`，回复后 `sync_all`，后台 `queue_prefetch_all`，压缩前 `on_pre_compress`。
 - `记忆开关`：可按 run 控制是否保存/使用记忆，以及是否参考历史聊天记录。
 - `Fence 防御`：召回记忆通过 `<memory-context>` 注入，并声明它不是新的用户输入。
-- `只读工具系统`：支持列文件、读文件、搜索文本，并限制在 workspace 根目录内。
+- `行为策略层`：在 graph 中硬执行 Superpowers Iron Law、Karpathy 行为规则、read-before-edit、hash preview 和自动恢复。
+- `受控工具系统`：支持列文件、读文件、搜索文本、质量检查、hash 锚定编辑预览和受控写入，并限制在 workspace 根目录内。
 - `安全检查器`：拦截危险删除、密钥泄露、可疑出站访问和重复工具调用。
 - `SSE 流式事件`：前端可以看到规划、工具调用、响应生成、持久化等中间过程。
 - `LangGraph 1.x 拓扑预留`：使用新版稳定线保留可编译 graph，方便后续接 checkpoint 和更复杂编排。

@@ -30,8 +30,11 @@ class AgentState:
     skill_context_block: str = ""
     selected_skills: list[dict[str, Any]] = field(default_factory=list)
     skill_budget: dict[str, Any] = field(default_factory=dict)
+    behavior_policy: dict[str, Any] = field(default_factory=dict)
     context: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    patch_proposal: dict[str, Any] | None = None
+    awaiting_approval: bool = False
     response: str = ""
     blocked: bool = False
     block_reason: str | None = None
@@ -54,6 +57,7 @@ class AgentState:
             "skill_context_block": self.skill_context_block,
             "selected_skills": self.selected_skills,
             "skill_budget": self.skill_budget,
+            "behavior_policy": self.behavior_policy,
             "context": self.context,
             "tool_calls": [
                 {
@@ -65,6 +69,8 @@ class AgentState:
                 }
                 for call in self.tool_calls
             ],
+            "patch_proposal": self.patch_proposal,
+            "awaiting_approval": self.awaiting_approval,
             "response": self.response,
             "blocked": self.blocked,
             "block_reason": self.block_reason,

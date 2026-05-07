@@ -5,10 +5,17 @@ from .database import (
     init_database,
     sqlite_url,
 )
+from .governance import MemoryGovernanceError, MemoryGovernanceService
 from .models import (
     Base,
+    MemoryCandidateRecord,
+    MemoryCandidateStatus,
+    MemoryEntryRecord,
+    MemoryEntryStatus,
+    MemoryTarget,
     MessageRecord,
     MessageRole,
+    PatchProposalRecord,
     RunRecord,
     RunStatus,
     SessionRecord,
@@ -18,14 +25,23 @@ from .models import (
     TimingPointRecord,
     ToolCallRecord,
     ToolCallStatus,
+    WorkflowObservationRecord,
 )
 from .repository import SQLiteMemoryRepository, init_sqlite_memory
 
 __all__ = [
     "Base",
     "DEFAULT_SQLITE_URL",
+    "MemoryCandidateRecord",
+    "MemoryCandidateStatus",
+    "MemoryEntryRecord",
+    "MemoryEntryStatus",
+    "MemoryGovernanceError",
+    "MemoryGovernanceService",
+    "MemoryTarget",
     "MessageRecord",
     "MessageRole",
+    "PatchProposalRecord",
     "RunRecord",
     "RunStatus",
     "SQLiteMemoryRepository",
@@ -36,6 +52,7 @@ __all__ = [
     "TimingPointRecord",
     "ToolCallRecord",
     "ToolCallStatus",
+    "WorkflowObservationRecord",
     "create_memory_engine",
     "create_session_factory",
     "init_database",

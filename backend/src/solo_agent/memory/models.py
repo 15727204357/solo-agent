@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -22,6 +22,7 @@ class SessionType(StrEnum):
 
 class RunStatus(StrEnum):
     RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -45,6 +46,26 @@ class SnapshotType(StrEnum):
     CHECKPOINT = "checkpoint"
     CONTEXT = "context"
     SUMMARY = "summary"
+
+
+class MemoryTarget(StrEnum):
+    MEMORY = "memory"
+    USER = "user"
+    SKILL = "skill"
+
+
+class MemoryCandidateStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    DUPLICATE = "duplicate"
+    BLOCKED = "blocked"
+
+
+class MemoryEntryStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    REVOKED = "revoked"
 
 
 class Base(DeclarativeBase):
@@ -86,6 +107,7 @@ class RunRecord(Base):
     tool_calls: Mapped[list[ToolCallRecord]] = relationship(back_populates="run", cascade="all, delete-orphan")
     timing_points: Mapped[list[TimingPointRecord]] = relationship(back_populates="run", cascade="all, delete-orphan")
     snapshots: Mapped[list[SnapshotRecord]] = relationship(back_populates="run")
+    patch_proposals: Mapped[list[PatchProposalRecord]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
 
 class MessageRecord(Base):
@@ -155,7 +177,86 @@ class SnapshotRecord(Base):
     run: Mapped[RunRecord | None] = relationship(back_populates="snapshots")
 
 
+class PatchProposalRecord(Base):
+    __tablename__ = "patch_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    edits: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    diff: Mapped[str] = mapped_column(Text, default="")
+    apply_results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    verification: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    run: Mapped[RunRecord] = relationship(back_populates="patch_proposals")
+
+
+class MemoryCandidateRecord(Base):
+    __tablename__ = "memory_candidates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    target: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), default=MemoryCandidateStatus.PENDING.value, index=True)
+    duplicate_of_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    conflict_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    safety_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MemoryEntryRecord(Base):
+    __tablename__ = "memory_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    target: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("memory_candidates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    supersedes_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default=MemoryEntryStatus.ACTIVE.value, index=True)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowObservationRecord(Base):
+    __tablename__ = "workflow_observations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    signature: Mapped[str] = mapped_column(String(255), index=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_skill_slug: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
 Index("ix_messages_session_sequence", MessageRecord.session_id, MessageRecord.sequence)
 Index("ix_tool_calls_run_started", ToolCallRecord.run_id, ToolCallRecord.started_at)
 Index("ix_timing_points_run_created", TimingPointRecord.run_id, TimingPointRecord.created_at)
 Index("ix_snapshots_session_created", SnapshotRecord.session_id, SnapshotRecord.created_at)
+Index("ix_patch_proposals_run_created", PatchProposalRecord.run_id, PatchProposalRecord.created_at)
+Index("ix_memory_candidates_status_created", MemoryCandidateRecord.status, MemoryCandidateRecord.created_at)
+Index("ix_memory_entries_target_status", MemoryEntryRecord.target, MemoryEntryRecord.status)
+Index("ix_workflow_observations_signature_created", WorkflowObservationRecord.signature, WorkflowObservationRecord.created_at)

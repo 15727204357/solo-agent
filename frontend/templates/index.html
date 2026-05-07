@@ -135,6 +135,22 @@
           </dl>
         </section>
 
+        <section class="monitor-section memory-panel" aria-labelledby="memory-title">
+          <div class="section-title">
+            <h3 id="memory-title">Memory Inbox</h3>
+            <span id="memory-count">0 pending</span>
+          </div>
+          <div class="memory-actions">
+            <button id="memory-refresh" class="secondary-button" type="button">Refresh</button>
+            <span id="memory-status">No pending memory candidates.</span>
+          </div>
+          <div id="memory-list" class="memory-list" aria-live="polite"></div>
+          <details class="memory-entries">
+            <summary>Published memory</summary>
+            <div id="memory-entries" class="memory-entry-list"></div>
+          </details>
+        </section>
+
         <section class="monitor-section" aria-labelledby="plan-title">
           <div class="section-title">
             <h3 id="plan-title">计划摘要</h3>

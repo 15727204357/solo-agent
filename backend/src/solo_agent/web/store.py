@@ -10,9 +10,11 @@ from pathlib import Path
 
 from solo_agent.memory import SQLiteMemoryRepository, init_sqlite_memory
 from solo_agent.memory.models import MessageRole, RunStatus
-from solo_agent.web.models import RunEvent, RunRecord, SessionRecord, utc_now
+from solo_agent.verified_editing import PatchProposal
+from solo_agent.web.models import RunEvent, RunRecord, SessionRecord, new_id, utc_now
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+RUN_STATUSES = {*TERMINAL_STATUSES, "running", "queued", "awaiting_approval"}
 
 
 class SessionRepository(ABC):
@@ -54,6 +56,73 @@ class SessionRepository(ABC):
     async def get_summary(self, session_id: str) -> dict[str, object] | None:
         raise NotImplementedError
 
+    async def create_patch_proposal(self, proposal: PatchProposal) -> PatchProposal:
+        raise NotImplementedError
+
+    async def list_patch_proposals(self, session_id: str, run_id: str) -> list[PatchProposal]:
+        raise NotImplementedError
+
+    async def get_patch_proposal(self, session_id: str, run_id: str, patch_id: str) -> PatchProposal | None:
+        raise NotImplementedError
+
+    async def update_patch_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        patch_id: str,
+        *,
+        status: str | None = None,
+        apply_results: list[dict[str, object]] | None = None,
+        verification: dict[str, object] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> PatchProposal | None:
+        raise NotImplementedError
+
+    async def list_memory_candidates(
+        self,
+        *,
+        status: str | None = None,
+        target: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        raise NotImplementedError
+
+    async def update_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        content: str | None = None,
+        target: str | None = None,
+        confidence: float | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        raise NotImplementedError
+
+    async def approve_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        resolution: str = "add",
+        content: str | None = None,
+    ) -> dict[str, object]:
+        raise NotImplementedError
+
+    async def reject_memory_candidate(self, candidate_id: str, *, reason: str | None = None) -> dict[str, object] | None:
+        raise NotImplementedError
+
+    async def list_memory_entries(
+        self,
+        *,
+        target: str | None = None,
+        include_inactive: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        raise NotImplementedError
+
+    async def revoke_memory_entry(self, entry_id: str, *, reason: str | None = None) -> dict[str, object] | None:
+        raise NotImplementedError
+
     @abstractmethod
     async def mark_run_status(self, session_id: str, run_id: str, status: str) -> None:
         raise NotImplementedError
@@ -88,6 +157,10 @@ class InMemorySessionRepository(SessionRepository):
         self._events: dict[str, list[RunEvent]] = defaultdict(list)
         self._subscribers: dict[str, set[asyncio.Queue[RunEvent]]] = defaultdict(set)
         self._messages: dict[str, list[dict[str, object]]] = defaultdict(list)
+        self._patches: dict[str, PatchProposal] = {}
+        self._run_patches: dict[str, list[str]] = defaultdict(list)
+        self._memory_candidates: dict[str, dict[str, object]] = {}
+        self._memory_entries: dict[str, dict[str, object]] = {}
 
     async def create_session(self, title: str, workspace_path: str | None) -> SessionRecord:
         async with self._lock:
@@ -150,7 +223,185 @@ class InMemorySessionRepository(SessionRepository):
     async def get_summary(self, session_id: str) -> dict[str, object] | None:
         return None
 
+    async def create_patch_proposal(self, proposal: PatchProposal) -> PatchProposal:
+        async with self._lock:
+            self._patches[proposal.id] = proposal
+            self._run_patches[proposal.run_id].append(proposal.id)
+            if proposal.session_id in self._sessions:
+                self._sessions[proposal.session_id].updated_at = utc_now()
+            return proposal
+
+    async def list_patch_proposals(self, session_id: str, run_id: str) -> list[PatchProposal]:
+        async with self._lock:
+            return [
+                self._patches[patch_id]
+                for patch_id in self._run_patches.get(run_id, [])
+                if patch_id in self._patches and self._patches[patch_id].session_id == session_id
+            ]
+
+    async def get_patch_proposal(self, session_id: str, run_id: str, patch_id: str) -> PatchProposal | None:
+        async with self._lock:
+            proposal = self._patches.get(patch_id)
+            if proposal is None or proposal.session_id != session_id or proposal.run_id != run_id:
+                return None
+            return proposal
+
+    async def update_patch_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        patch_id: str,
+        *,
+        status: str | None = None,
+        apply_results: list[dict[str, object]] | None = None,
+        verification: dict[str, object] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> PatchProposal | None:
+        async with self._lock:
+            proposal = self._patches.get(patch_id)
+            if proposal is None or proposal.session_id != session_id or proposal.run_id != run_id:
+                return None
+            payload = proposal.model_dump(mode="json")
+            payload.update(
+                {
+                    key: value
+                    for key, value in {
+                        "status": status,
+                        "apply_results": apply_results,
+                        "verification": verification,
+                        "error": error,
+                    }.items()
+                    if value is not None
+                }
+            )
+            proposal = PatchProposal.model_validate(payload)
+            self._patches[patch_id] = proposal
+            return proposal
+
+    async def list_memory_candidates(
+        self,
+        *,
+        status: str | None = None,
+        target: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        async with self._lock:
+            items = list(self._memory_candidates.values())
+            if status is not None:
+                items = [item for item in items if item.get("status") == status]
+            if target is not None:
+                items = [item for item in items if item.get("target") == target]
+            return sorted(items, key=lambda item: str(item.get("created_at", "")), reverse=True)[:limit]
+
+    async def update_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        content: str | None = None,
+        target: str | None = None,
+        confidence: float | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        async with self._lock:
+            candidate = self._memory_candidates.get(candidate_id)
+            if candidate is None:
+                return None
+            if content is not None:
+                candidate["content"] = content
+            if target is not None:
+                candidate["target"] = target
+            if confidence is not None:
+                candidate["confidence"] = confidence
+            if metadata:
+                candidate["metadata"] = {**dict(candidate.get("metadata") or {}), **metadata}
+            candidate["updated_at"] = utc_now().isoformat()
+            return dict(candidate)
+
+    async def approve_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        resolution: str = "add",
+        content: str | None = None,
+    ) -> dict[str, object]:
+        async with self._lock:
+            candidate = self._memory_candidates.get(candidate_id)
+            if candidate is None:
+                raise ValueError("Memory candidate not found")
+            if candidate.get("status") != "pending":
+                raise ValueError("Candidate is not pending")
+            conflict_ids = list(candidate.get("conflict_ids") or [])
+            if conflict_ids and resolution == "add":
+                raise ValueError("conflict_requires_resolution")
+            now = utc_now().isoformat()
+            if resolution in {"replace", "merge"}:
+                for entry_id in conflict_ids:
+                    if entry_id in self._memory_entries:
+                        self._memory_entries[entry_id]["status"] = "superseded"
+                        self._memory_entries[entry_id]["updated_at"] = now
+            entry = {
+                "id": new_id("mem"),
+                "target": candidate.get("target"),
+                "content": content or candidate.get("content", ""),
+                "source_candidate_id": candidate_id,
+                "confidence": candidate.get("confidence", 0.0),
+                "supersedes_id": conflict_ids[0] if conflict_ids else None,
+                "status": "active",
+                "metadata": {"resolution": resolution},
+                "created_at": now,
+                "updated_at": now,
+                "revoked_at": None,
+            }
+            candidate["content"] = entry["content"]
+            candidate["status"] = "approved"
+            candidate["updated_at"] = now
+            candidate["decided_at"] = now
+            self._memory_entries[str(entry["id"])] = entry
+            return {"candidate": dict(candidate), "entry": dict(entry)}
+
+    async def reject_memory_candidate(self, candidate_id: str, *, reason: str | None = None) -> dict[str, object] | None:
+        async with self._lock:
+            candidate = self._memory_candidates.get(candidate_id)
+            if candidate is None:
+                return None
+            candidate["status"] = "rejected"
+            candidate["decided_at"] = utc_now().isoformat()
+            if reason:
+                candidate["metadata"] = {**dict(candidate.get("metadata") or {}), "rejection_reason": reason}
+            return dict(candidate)
+
+    async def list_memory_entries(
+        self,
+        *,
+        target: str | None = None,
+        include_inactive: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        async with self._lock:
+            items = list(self._memory_entries.values())
+            if target is not None:
+                items = [item for item in items if item.get("target") == target]
+            if not include_inactive:
+                items = [item for item in items if item.get("status") == "active"]
+            return sorted(items, key=lambda item: str(item.get("updated_at", "")), reverse=True)[:limit]
+
+    async def revoke_memory_entry(self, entry_id: str, *, reason: str | None = None) -> dict[str, object] | None:
+        async with self._lock:
+            entry = self._memory_entries.get(entry_id)
+            if entry is None:
+                return None
+            now = utc_now().isoformat()
+            entry["status"] = "revoked"
+            entry["revoked_at"] = now
+            entry["updated_at"] = now
+            if reason:
+                entry["metadata"] = {**dict(entry.get("metadata") or {}), "revocation_reason": reason}
+            return dict(entry)
+
     async def mark_run_status(self, session_id: str, run_id: str, status: str) -> None:
+        if status not in RUN_STATUSES:
+            return
         async with self._lock:
             run = self._runs.get(run_id)
             if run is None or run.session_id != session_id:
@@ -332,10 +583,120 @@ class SQLiteSessionRepository(SessionRepository):
         return await self._repo()
 
     async def mark_run_status(self, session_id: str, run_id: str, status: str) -> None:
+        if status not in RUN_STATUSES:
+            return
         repo = await self._repo()
-        if status in TERMINAL_STATUSES:
+        if hasattr(repo, "set_run_status"):
+            await repo.set_run_status(run_id=run_id, status=status)
+        elif status in TERMINAL_STATUSES:
             mapped = RunStatus.COMPLETED if status == "completed" else RunStatus.FAILED
             await repo.complete_run(run_id=run_id, status=mapped)
+
+    async def create_patch_proposal(self, proposal: PatchProposal) -> PatchProposal:
+        repo = await self._repo()
+        record = await repo.create_patch_proposal(
+            session_id=proposal.session_id,
+            run_id=proposal.run_id,
+            patch_id=proposal.id,
+            summary=proposal.summary,
+            edits=[edit.model_dump(mode="json") for edit in proposal.edits],
+            diff=proposal.diff,
+            status=proposal.status,
+        )
+        return _patch_from_memory(record)
+
+    async def list_patch_proposals(self, session_id: str, run_id: str) -> list[PatchProposal]:
+        repo = await self._repo()
+        records = await repo.list_patch_proposals(session_id=session_id, run_id=run_id)
+        return [_patch_from_memory(record) for record in records]
+
+    async def get_patch_proposal(self, session_id: str, run_id: str, patch_id: str) -> PatchProposal | None:
+        repo = await self._repo()
+        record = await repo.get_patch_proposal(patch_id)
+        if record is None or record.session_id != session_id or record.run_id != run_id:
+            return None
+        return _patch_from_memory(record)
+
+    async def update_patch_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        patch_id: str,
+        *,
+        status: str | None = None,
+        apply_results: list[dict[str, object]] | None = None,
+        verification: dict[str, object] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> PatchProposal | None:
+        repo = await self._repo()
+        record = await repo.update_patch_proposal(
+            patch_id=patch_id,
+            status=status,
+            apply_results=apply_results,
+            verification=verification,
+            error=error,
+            decided=decided,
+        )
+        if record is None or record.session_id != session_id or record.run_id != run_id:
+            return None
+        return _patch_from_memory(record)
+
+    async def list_memory_candidates(
+        self,
+        *,
+        status: str | None = None,
+        target: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        repo = await self._repo()
+        return await repo.list_memory_candidates(status=status, target=target, limit=limit)
+
+    async def update_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        content: str | None = None,
+        target: str | None = None,
+        confidence: float | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        repo = await self._repo()
+        return await repo.update_memory_candidate(
+            candidate_id,
+            content=content,
+            target=target,
+            confidence=confidence,
+            metadata=metadata,
+        )
+
+    async def approve_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        resolution: str = "add",
+        content: str | None = None,
+    ) -> dict[str, object]:
+        repo = await self._repo()
+        return await repo.approve_memory_candidate(candidate_id, resolution=resolution, content=content)
+
+    async def reject_memory_candidate(self, candidate_id: str, *, reason: str | None = None) -> dict[str, object] | None:
+        repo = await self._repo()
+        return await repo.reject_memory_candidate(candidate_id, reason=reason)
+
+    async def list_memory_entries(
+        self,
+        *,
+        target: str | None = None,
+        include_inactive: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        repo = await self._repo()
+        return await repo.list_memory_entries(target=target, include_inactive=include_inactive, limit=limit)
+
+    async def revoke_memory_entry(self, entry_id: str, *, reason: str | None = None) -> dict[str, object] | None:
+        repo = await self._repo()
+        return await repo.revoke_memory_entry(entry_id, reason=reason)
 
     async def append_event(
         self,
@@ -453,6 +814,24 @@ def _run_from_memory(record: object) -> RunRecord:
         created_at=record.started_at,
         updated_at=record.completed_at or record.started_at,
         completed_at=record.completed_at,
+    )
+
+
+def _patch_from_memory(record: object) -> PatchProposal:
+    return PatchProposal(
+        id=str(record.id),
+        session_id=str(record.session_id),
+        run_id=str(record.run_id),
+        status=str(record.status),
+        summary=str(record.summary or ""),
+        diff=str(record.diff or ""),
+        edits=list(record.edits or []),
+        apply_results=list(record.apply_results or []),
+        verification=record.verification,
+        error=record.error,
+        created_at=record.created_at.isoformat() if record.created_at else None,
+        updated_at=record.updated_at.isoformat() if record.updated_at else None,
+        decided_at=record.decided_at.isoformat() if record.decided_at else None,
     )
 
 

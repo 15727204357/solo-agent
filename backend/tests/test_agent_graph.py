@@ -59,6 +59,21 @@ class SummaryFailProvider(FakeProvider):
         raise RuntimeError("summary failed")
 
 
+class PatchProvider(FakeProvider):
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        self.seen_messages.append(messages)
+        return (
+            '{"summary":"Update greeting","edits":[{"path":"app.py",'
+            '"old_text":"hello","new_text":"hi","reason":"demo"}]}'
+        )
+
+
 class HeuristicToolRegistry:
     def __init__(self, *, long_output: bool = False) -> None:
         self.long_output = long_output
@@ -87,6 +102,9 @@ class ProtocolToolRegistry:
 
     def list_tools(self) -> list[dict[str, str]]:
         return [
+            {"name": "read_file"},
+            {"name": "search_text"},
+            {"name": "workspace_snapshot"},
             {"name": "prepare_edit"},
             {"name": "get_file_hash"},
             {"name": "preview_patch"},
@@ -100,6 +118,18 @@ class ProtocolToolRegistry:
         expected_hash = arguments.get("expected_hash") or self.hashes.get(name) or "hash-1"
         if name == "run_pytest":
             return {"ok": False, "result": {"exit_code": 1, "failed": True}}
+        if name in {"read_file", "search_text", "workspace_snapshot"}:
+            return {"ok": True, "result": {"path": path, "content": "current context"}}
+        if name == "preview_patch":
+            return {
+                "ok": True,
+                "result": {
+                    "path": path,
+                    "expected_hash": expected_hash,
+                    "changed": True,
+                    "diff": "--- app.py\n+++ app.py\n@@\n-a\n+b",
+                },
+            }
         return {"ok": True, "result": {"path": path, "expected_hash": expected_hash}}
 
 
@@ -284,6 +314,10 @@ async def test_agent_graph_injects_skills_as_user_message_only(tmp_path) -> None
     assert any(event.type == "skill_selection_started" for event in events)
     assert any(event.type == "skill_loaded" for event in events)
     assert any(event.type == "skill_context_built" for event in events)
+    policy = next(event for event in events if event.type == "policy_evaluation_completed")
+    assert policy.data["engine"] == "graph_behavior_policy"
+    assert "superpowers_tdd_iron_law" in policy.data["enforced_principles"]
+    assert policy.data["hard_gates"]["production_edit_requires_failing_test_signal"] is True
     assert any(event.type == "tool_protocol_applied" for event in events)
     assert any(event.type == "iron_law_blocked" for event in events)
 
@@ -426,11 +460,14 @@ async def test_agent_graph_rejects_bare_apply_text_edit(monkeypatch) -> None:
         "fix the production bug after seeing a failing test",
     )
 
-    assert registry.calls == []
-    violation = next(event for event in events if event.type == "tool_protocol_blocked")
-    assert violation.data["name"] == "apply_text_edit"
-    assert violation.data["reason"] == "apply_text_edit_protocol_incomplete"
-    assert set(violation.data["missing"]) == {"prepare_edit_or_get_file_hash", "preview_patch"}
+    assert [name for name, _ in registry.calls] == [
+        "read_file",
+        "prepare_edit",
+        "preview_patch",
+        "apply_text_edit",
+    ]
+    assert any(event.type == "tool_protocol_recovery_started" for event in events)
+    assert not any(event.type == "tool_protocol_blocked" for event in events)
 
 
 @pytest.mark.asyncio
@@ -456,11 +493,12 @@ async def test_agent_graph_allows_apply_after_hash_and_preview(monkeypatch) -> N
         monkeypatch,
         calls,
         "fix the production bug after seeing a failing test",
-        cutoff=4,
+        cutoff=6,
     )
 
     assert [name for name, _ in registry.calls] == [
         "get_file_hash",
+        "read_file",
         "preview_patch",
         "apply_text_edit",
     ]
@@ -470,7 +508,7 @@ async def test_agent_graph_allows_apply_after_hash_and_preview(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_agent_graph_rejects_apply_when_preview_hash_differs(monkeypatch) -> None:
+async def test_agent_graph_recovers_apply_when_preview_hash_differs(monkeypatch) -> None:
     calls = [
         {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
         {
@@ -494,10 +532,15 @@ async def test_agent_graph_rejects_apply_when_preview_hash_differs(monkeypatch) 
         "fix the production bug after seeing a failing test",
     )
 
-    assert [name for name, _ in registry.calls] == ["prepare_edit", "preview_patch"]
-    violation = next(event for event in events if event.type == "tool_protocol_blocked")
-    assert violation.data["reason"] == "apply_text_edit_protocol_incomplete"
-    assert violation.data["missing"] == ["preview_patch"]
+    assert [name for name, _ in registry.calls] == [
+        "read_file",
+        "prepare_edit",
+        "preview_patch",
+        "preview_patch",
+        "apply_text_edit",
+    ]
+    assert any(event.type == "tool_protocol_recovery_started" for event in events)
+    assert not any(event.type == "tool_protocol_blocked" for event in events)
 
 
 @pytest.mark.asyncio
@@ -526,13 +569,13 @@ async def test_agent_graph_blocks_production_apply_without_failing_test_signal(m
     )
 
     assert any(event.type == "iron_law_blocked" for event in events)
-    assert [name for name, _ in registry.calls] == ["prepare_edit", "preview_patch"]
+    assert [name for name, _ in registry.calls] == ["read_file", "prepare_edit", "preview_patch"]
     violation = next(event for event in events if event.type == "tool_protocol_blocked")
     assert violation.data["reason"] == "iron_law_blocked"
 
 
 @pytest.mark.asyncio
-async def test_agent_graph_warns_but_allows_apply_when_user_skips_tests(monkeypatch) -> None:
+async def test_agent_graph_treats_iron_law_as_hard_constraint_when_user_skips_tests(monkeypatch) -> None:
     calls = [
         {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
         {
@@ -556,13 +599,51 @@ async def test_agent_graph_warns_but_allows_apply_when_user_skips_tests(monkeypa
         "implement a production code change and skip tests",
     )
 
-    assert any(event.type == "iron_law_warning" for event in events)
-    assert not any(event.type == "iron_law_blocked" for event in events)
+    assert any(event.type == "iron_law_blocked" for event in events)
+    assert not any(event.type == "iron_law_warning" for event in events)
     assert [name for name, _ in registry.calls] == [
+        "read_file",
+        "prepare_edit",
+        "preview_patch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_allows_production_apply_after_failed_quality_tool_signal(monkeypatch) -> None:
+    calls = [
+        {"name": "run_pytest", "arguments": {"target": "backend/tests/test_agent_graph.py"}},
+        {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {"path": "backend/src/solo_agent/app.py", "expected_hash": "hash-1"},
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    events, registry = await _run_with_proposed_tools(
+        monkeypatch,
+        calls,
+        "implement a production code change",
+        cutoff=8,
+    )
+
+    assert [name for name, _ in registry.calls] == [
+        "run_pytest",
+        "read_file",
         "prepare_edit",
         "preview_patch",
         "apply_text_edit",
     ]
+    assert not any(event.type == "iron_law_blocked" for event in events)
+    assert not any(event.type == "tool_protocol_blocked" for event in events)
 
 
 @pytest.mark.asyncio
@@ -588,10 +669,11 @@ async def test_agent_graph_defers_verification_when_cutoff_is_exhausted(monkeypa
         monkeypatch,
         calls,
         "fix the production bug after seeing a failing test",
-        cutoff=3,
+        cutoff=5,
     )
 
     assert [name for name, _ in registry.calls] == [
+        "read_file",
         "prepare_edit",
         "preview_patch",
         "apply_text_edit",
@@ -599,6 +681,93 @@ async def test_agent_graph_defers_verification_when_cutoff_is_exhausted(monkeypa
     assert any(event.type == "verification_required" for event in events)
     deferred = next(event for event in events if event.type == "verification_deferred")
     assert deferred.data["reason"] == "tool_call_cut_off_reached_after_edit"
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_proposes_verified_patch_and_pauses_for_approval(tmp_path) -> None:
+    (tmp_path / "app.py").write_text("hello\n", encoding="utf-8")
+    provider = PatchProvider()
+
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "fix app.py greeting",
+            deps=AgentDeps(provider=provider, tool_registry=create_default_registry(tmp_path)),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                verified_editing_enabled=True,
+                max_tool_calls=3,
+                tool_call_cut_off=3,
+            ),
+        )
+    ]
+
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "hello\n"
+    assert any(event.type == "patch_generation_started" for event in events)
+    proposed = next(event for event in events if event.type == "patch_proposed")
+    assert proposed.data["status"] == "pending"
+    assert "--- app.py" in proposed.data["diff"]
+    assert events[-1].type == "patch_approval_required"
+    assert not any(event.type == "response_started" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_converts_apply_text_edit_to_patch_proposal(monkeypatch) -> None:
+    calls = [
+        {"name": "prepare_edit", "arguments": {"path": "backend/src/solo_agent/app.py"}},
+        {
+            "name": "preview_patch",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old_text": "a",
+                "new_text": "b",
+            },
+        },
+        {
+            "name": "apply_text_edit",
+            "arguments": {
+                "path": "backend/src/solo_agent/app.py",
+                "expected_hash": "hash-1",
+                "old": "a",
+                "new": "b",
+            },
+        },
+    ]
+
+    async def fake_propose_tool_calls(tool_registry, state, settings):
+        return calls
+
+    monkeypatch.setattr(graph_module, "_propose_tool_calls", fake_propose_tool_calls)
+    registry = ProtocolToolRegistry()
+    events = [
+        event
+        async for event in run_agent_events(
+            "session-1",
+            "run-1",
+            "fix the production bug after seeing a failing test",
+            deps=AgentDeps(provider=FakeProvider(), tool_registry=registry),
+            settings=AgentSettings(
+                provider="ollama",
+                model="fake-model",
+                verified_editing_enabled=True,
+                max_tool_calls=3,
+                tool_call_cut_off=8,
+            ),
+        )
+    ]
+
+    assert [name for name, _ in registry.calls] == [
+        "read_file",
+        "prepare_edit",
+        "preview_patch",
+        "preview_patch",
+    ]
+    assert any(event.type == "patch_approval_required" for event in events)
+    assert not any(name == "apply_text_edit" for name, _ in registry.calls)
 
 
 @pytest.mark.asyncio

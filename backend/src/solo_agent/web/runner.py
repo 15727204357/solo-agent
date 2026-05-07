@@ -65,6 +65,8 @@ class AgentRunner:
                 auxiliary_compression_base_url=settings.auxiliary_compression_base_url,
                 memory_enabled=memory_enabled,
                 conversation_history_enabled=conversation_history_enabled,
+                verified_editing_enabled=settings.verified_editing_enabled,
+                patch_max_tokens=settings.patch_max_tokens,
             )
             registry = create_default_registry(settings.workspace_root)
             provider = create_provider_from_settings(agent_settings)
@@ -79,6 +81,7 @@ class AgentRunner:
                 settings=agent_settings,
             )
 
+            awaiting_approval = False
             async for event in run_agent_events(
                 session_id=session_id,
                 run_id=run_id,
@@ -93,8 +96,14 @@ class AgentRunner:
                     event.message,
                     event.to_dict(),
                 )
+                if event.type == "patch_approval_required":
+                    awaiting_approval = True
 
-            await self._repository.mark_run_status(session_id, run_id, "completed")
+            await self._repository.mark_run_status(
+                session_id,
+                run_id,
+                "awaiting_approval" if awaiting_approval else "completed",
+            )
         except Exception as exc:  # pragma: no cover - defensive boundary for background tasks.
             await self._repository.append_event(
                 session_id,

@@ -11,9 +11,13 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .database import create_memory_engine, create_session_factory, init_database
+from .governance import MemoryGovernanceError, MemoryGovernanceService
 from .models import (
+    MemoryCandidateRecord,
+    MemoryEntryRecord,
     MessageRecord,
     MessageRole,
+    PatchProposalRecord,
     RunRecord,
     RunStatus,
     SessionRecord,
@@ -64,6 +68,43 @@ def _message_dict(message: MessageRecord) -> dict[str, Any]:
     }
 
 
+def _memory_candidate_dict(record: MemoryCandidateRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "target": record.target,
+        "content": record.content,
+        "source_session_id": record.source_session_id,
+        "source_run_id": record.source_run_id,
+        "source_message_id": record.source_message_id,
+        "source_excerpt": record.source_excerpt,
+        "confidence": record.confidence,
+        "status": record.status,
+        "duplicate_of_id": record.duplicate_of_id,
+        "conflict_ids": list(record.conflict_ids or []),
+        "safety_flags": list(record.safety_flags or []),
+        "metadata": dict(record.metadata_ or {}),
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "decided_at": record.decided_at.isoformat() if record.decided_at else None,
+    }
+
+
+def _memory_entry_dict(record: MemoryEntryRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "target": record.target,
+        "content": record.content,
+        "source_candidate_id": record.source_candidate_id,
+        "confidence": record.confidence,
+        "supersedes_id": record.supersedes_id,
+        "status": record.status,
+        "metadata": dict(record.metadata_ or {}),
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "revoked_at": record.revoked_at.isoformat() if record.revoked_at else None,
+    }
+
+
 def _snapshot_summary(snapshot: SnapshotRecord | None) -> str:
     if snapshot is None:
         return ""
@@ -108,6 +149,7 @@ class SQLiteMemoryRepository:
         self._session_factory = session_factory
         self.memory_root = Path(memory_root or Path.cwd()).resolve()
         self._prefetch_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._governance = MemoryGovernanceService(session_factory, memory_root=self.memory_root)
 
     @classmethod
     def from_engine(
@@ -214,6 +256,34 @@ class SQLiteMemoryRepository:
     async def get_run(self, run_id: str) -> RunRecord | None:
         async with self._session_factory() as session:
             return await session.get(RunRecord, run_id)
+
+    async def set_run_status(
+        self,
+        *,
+        run_id: str,
+        status: RunStatus | str,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RunRecord | None:
+        now = utc_now()
+        async with self._session_factory() as session:
+            record = await session.get(RunRecord, run_id)
+            if record is None:
+                return None
+            record.status = _value(status)
+            record.error = error
+            record.metadata_ = _merge_metadata(record.metadata_, metadata)
+            if record.status in {
+                RunStatus.COMPLETED.value,
+                RunStatus.FAILED.value,
+                RunStatus.CANCELLED.value,
+            }:
+                record.completed_at = now
+            else:
+                record.completed_at = None
+            await self._touch_session(session, record.session_id, now)
+            await session.commit()
+            return record
 
     async def list_messages(
         self,
@@ -451,28 +521,98 @@ class SQLiteMemoryRepository:
         *,
         session_id: str,
         payload: dict[str, Any],
+        run_id: str | None = None,
     ) -> dict[str, Any]:
-        builtin = await self.load_builtin_memory()
         insights = _extract_preference_lines(payload)
         warnings: list[str] = []
-        if insights:
-            user_file = self.memory_root / "USER.md"
-            existing = builtin.get("user", "")
-            additions = "\n".join(f"- {line}" for line in insights if line not in existing)
-            if additions:
-                try:
-                    user_file.write_text((existing.rstrip() + "\n" + additions + "\n").lstrip(), encoding="utf-8")
-                    await self._index_builtin_memory(await self.load_builtin_memory())
-                except OSError as exc:
-                    warnings.append(str(exc))
-        return {"insights": insights, "session_id": session_id, "warnings": warnings}
+        candidates: list[MemoryCandidateRecord] = []
+        try:
+            candidates = await self._governance.submit_from_pre_compress(
+                session_id=session_id,
+                run_id=run_id,
+                payload=payload,
+                insights=insights,
+            )
+        except (MemoryGovernanceError, OSError) as exc:
+            warnings.append(str(exc))
+        return {
+            "insights": insights,
+            "session_id": session_id,
+            "warnings": warnings,
+            "candidates": [_memory_candidate_dict(candidate) for candidate in candidates],
+        }
 
     async def load_builtin_memory(self) -> dict[str, str]:
-        self._ensure_builtin_memory_files()
+        await self._governance.ensure_seeded_builtin_entries()
         return {
             "memory": (self.memory_root / "MEMORY.md").read_text(encoding="utf-8"),
             "user": (self.memory_root / "USER.md").read_text(encoding="utf-8"),
         }
+
+    async def list_memory_candidates(
+        self,
+        *,
+        status: str | None = None,
+        target: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        records = await self._governance.list_candidates(status=status, target=target, limit=limit)
+        return [_memory_candidate_dict(record) for record in records]
+
+    async def update_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        content: str | None = None,
+        target: str | None = None,
+        confidence: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        record = await self._governance.update_candidate(
+            candidate_id,
+            content=content,
+            target=target,
+            confidence=confidence,
+            metadata=metadata,
+        )
+        return _memory_candidate_dict(record) if record else None
+
+    async def approve_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        resolution: str = "add",
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        candidate, entry = await self._governance.approve_candidate(
+            candidate_id,
+            resolution=resolution,
+            content=content,
+        )
+        await self._index_builtin_memory(await self.load_builtin_memory())
+        return {
+            "candidate": _memory_candidate_dict(candidate),
+            "entry": _memory_entry_dict(entry),
+        }
+
+    async def reject_memory_candidate(self, candidate_id: str, *, reason: str | None = None) -> dict[str, Any] | None:
+        record = await self._governance.reject_candidate(candidate_id, reason=reason)
+        return _memory_candidate_dict(record) if record else None
+
+    async def list_memory_entries(
+        self,
+        *,
+        target: str | None = None,
+        include_inactive: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        records = await self._governance.list_entries(target=target, include_inactive=include_inactive, limit=limit)
+        return [_memory_entry_dict(record) for record in records]
+
+    async def revoke_memory_entry(self, entry_id: str, *, reason: str | None = None) -> dict[str, Any] | None:
+        record = await self._governance.revoke_entry(entry_id, reason=reason)
+        await self._index_builtin_memory(await self.load_builtin_memory())
+        return _memory_entry_dict(record) if record else None
 
     async def append_message(
         self,
@@ -589,6 +729,91 @@ class SQLiteMemoryRepository:
         async with self._session_factory() as session:
             session.add(record)
             await self._touch_session(session, session_id, now)
+            await session.commit()
+            return record
+
+    async def create_patch_proposal(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        patch_id: str | None = None,
+        summary: str = "",
+        edits: list[dict[str, Any]] | None = None,
+        diff: str = "",
+        status: str = "pending",
+        proposal: Any | None = None,
+    ) -> PatchProposalRecord:
+        if proposal is not None:
+            session_id = proposal.session_id
+            run_id = proposal.run_id
+            patch_id = proposal.id
+            summary = proposal.summary
+            edits = [edit.model_dump(mode="json") for edit in proposal.edits]
+            diff = proposal.diff
+            status = proposal.status
+        if session_id is None or run_id is None or patch_id is None:
+            raise ValueError("session_id, run_id, and patch_id are required")
+        now = utc_now()
+        record = PatchProposalRecord(
+            id=patch_id,
+            session_id=session_id,
+            run_id=run_id,
+            status=status,
+            summary=summary,
+            edits=edits or [],
+            diff=diff,
+            apply_results=[],
+            verification=None,
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._session_factory() as session:
+            session.add(record)
+            await self._touch_session(session, session_id, now)
+            await session.commit()
+            return record
+
+    async def list_patch_proposals(self, *, session_id: str, run_id: str) -> Sequence[PatchProposalRecord]:
+        statement = (
+            select(PatchProposalRecord)
+            .where(PatchProposalRecord.session_id == session_id, PatchProposalRecord.run_id == run_id)
+            .order_by(PatchProposalRecord.created_at.desc())
+        )
+        async with self._session_factory() as session:
+            result = await session.scalars(statement)
+            return result.all()
+
+    async def get_patch_proposal(self, patch_id: str) -> PatchProposalRecord | None:
+        async with self._session_factory() as session:
+            return await session.get(PatchProposalRecord, patch_id)
+
+    async def update_patch_proposal(
+        self,
+        *,
+        patch_id: str,
+        status: str | None = None,
+        apply_results: list[dict[str, Any]] | None = None,
+        verification: dict[str, Any] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> PatchProposalRecord | None:
+        now = utc_now()
+        async with self._session_factory() as session:
+            record = await session.get(PatchProposalRecord, patch_id)
+            if record is None:
+                return None
+            if status is not None:
+                record.status = status
+            if apply_results is not None:
+                record.apply_results = apply_results
+            if verification is not None:
+                record.verification = verification
+            record.error = error
+            record.updated_at = now
+            if decided:
+                record.decided_at = now
+            await self._touch_session(session, record.session_id, now)
             await session.commit()
             return record
 

@@ -8,18 +8,24 @@ from typing import Any, TypedDict
 
 from solo_agent.context import ContextManager, ContextTokenEstimator, SubdirectoryHintTracker, TaskListState
 from solo_agent.providers import ChatMessage, ChatProvider, create_provider_from_settings
+from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequest, build_patch_proposal, extract_patch_request
 
 from .deps import AgentDeps, AgentSettings
 from .events import AgentEvent
+from .policy import BehaviorPolicy, tool_result_ok
 from .prompts import (
+    PATCH_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
     RESPONDER_SYSTEM_PROMPT,
     build_memory_context_block,
     build_skill_context_block,
+    patch_user_prompt,
     planner_user_prompt,
     responder_user_prompt,
 )
 from .state import AgentState, ToolCallRecord
+
+_BEHAVIOR_POLICY = BehaviorPolicy()
 
 
 class LangGraphTopologyState(TypedDict, total=False):
@@ -62,6 +68,7 @@ def build_langgraph_topology() -> Any:
         "inspect",
         "select_tools",
         "execute_tools",
+        "propose_verified_patch",
         "subdirectory_hint_track",
         "context_guard_before_respond",
         "respond",
@@ -106,7 +113,12 @@ async def run_agent_events(
         await _persist(deps.persistence, "finish_run", state, status="error", error=str(exc))
         yield event
     else:
-        await _persist(deps.persistence, "finish_run", state, status="completed")
+        await _persist(
+            deps.persistence,
+            "finish_run",
+            state,
+            status="awaiting_approval" if state.awaiting_approval else "completed",
+        )
 
 
 async def _run_graph(
@@ -161,6 +173,14 @@ async def _run_graph(
 
     async for event in _execute_tools_node(state, deps, settings):
         yield event
+    if state.awaiting_approval:
+        return
+
+    async for event in _propose_verified_patch_node(state, provider, deps, settings):
+        yield event
+    if state.awaiting_approval:
+        return
+
     async for event in _subdirectory_hint_stage(state, settings):
         yield event
 
@@ -423,6 +443,15 @@ async def _skill_context_stage(
             )
 
     state.selected_skills = loaded or state.selected_skills
+    state.behavior_policy = _BEHAVIOR_POLICY.build_snapshot(state)
+    state.snapshots["behavior_policy"] = state.behavior_policy
+    yield _event(
+        state,
+        "policy_evaluation_completed",
+        "policy",
+        "Evaluated graph-level behavior policy",
+        state.behavior_policy,
+    )
     state.loop_stage = "build_skill_context_block"
     if loaded:
         state.skill_context_block = build_skill_context_block(
@@ -499,7 +528,7 @@ async def _select_tools_node(
                 "proposed_tool_calls": proposed,
             },
         )
-    iron_law = _iron_law_decision(state, proposed)
+    iron_law = _BEHAVIOR_POLICY.iron_law_decision(state, proposed)
     if iron_law["action"] != "none":
         state.snapshots["iron_law"] = iron_law
     if iron_law["action"] == "blocked":
@@ -560,7 +589,8 @@ async def _execute_tools_node(
         return
 
     approved: list[dict[str, Any]] = []
-    protocol_state = _new_tool_protocol_state(state)
+    protocol_state = _BEHAVIOR_POLICY.new_tool_protocol_state(state)
+    available_tools = await _available_tool_names(deps.tool_registry) if deps.tool_registry is not None else set()
     cutoff = int(_setting(settings, "tool_call_cut_off", _setting(settings, "max_tool_calls", 3)))
     output_max_bytes = int(_setting(settings, "tool_output_max_bytes", 12_000))
     attempted = 0
@@ -574,7 +604,11 @@ async def _execute_tools_node(
         )
         return
 
-    for call in proposed:
+    pending = [dict(call) for call in proposed if isinstance(call, Mapping)]
+    index = 0
+    while index < len(pending):
+        call = pending[index]
+        index += 1
         if attempted >= cutoff:
             yield _event(
                 state,
@@ -585,7 +619,7 @@ async def _execute_tools_node(
                     "cutoff": cutoff,
                     "proposed_count": len(proposed),
                     "executed_count": attempted,
-                    "skipped_count": len(proposed) - attempted,
+                    "skipped_count": len(pending) - attempted,
                 },
             )
             break
@@ -607,8 +641,34 @@ async def _execute_tools_node(
             f"Inspecting tool {name}",
             {"name": name, "status": "inspecting"},
         )
-        protocol_violation = _tool_protocol_violation(state, name, arguments, protocol_state)
+        protocol_violation = _BEHAVIOR_POLICY.tool_protocol_violation(state, name, arguments, protocol_state)
         if protocol_violation is not None:
+            recovery_calls = _BEHAVIOR_POLICY.recovery_tool_calls(protocol_violation, name, arguments, available_tools)
+            if protocol_violation.get("recoverable") and recovery_calls:
+                yield _event(
+                    state,
+                    "tool_protocol_recovery_started",
+                    "execute_tools",
+                    "Recovering required behavior protocol steps",
+                    {
+                        "name": name,
+                        "reason": protocol_violation["reason"],
+                        "recovery_tool_calls": recovery_calls,
+                    },
+                )
+                pending[index:index] = [*recovery_calls, call]
+                yield _event(
+                    state,
+                    "tool_protocol_recovery_scheduled",
+                    "execute_tools",
+                    "Scheduled behavior protocol recovery tools",
+                    {
+                        "name": name,
+                        "reason": protocol_violation["reason"],
+                        "scheduled_count": len(recovery_calls),
+                    },
+                )
+                continue
             state.tool_calls.append(
                 ToolCallRecord(
                     name=name,
@@ -659,6 +719,12 @@ async def _execute_tools_node(
                 },
             )
             continue
+        if name == "apply_text_edit" and _verified_editing_enabled(settings):
+            async for event in _propose_patch_from_tool_arguments(state, deps, arguments):
+                yield event
+            if state.awaiting_approval:
+                return
+            continue
         approved.append(call)
 
         yield _event(
@@ -669,7 +735,7 @@ async def _execute_tools_node(
             {"name": name, "status": "executing"},
         )
         raw_result = await _call_tool(deps.tool_registry, name, arguments)
-        raw_result_ok = _tool_result_ok(raw_result)
+        raw_result_ok = tool_result_ok(raw_result)
         result, output_metadata = _truncate_tool_result(raw_result, output_max_bytes)
         yield _event(
             state,
@@ -695,7 +761,7 @@ async def _execute_tools_node(
             {"name": name, "result": result, "metadata": output_metadata},
         )
         if raw_result_ok:
-            _record_tool_protocol_success(protocol_state, name, arguments, raw_result)
+            _BEHAVIOR_POLICY.record_tool_success(protocol_state, name, arguments, raw_result)
         if name == "apply_text_edit" and raw_result_ok:
             yield _event(
                 state,
@@ -720,6 +786,140 @@ async def _execute_tools_node(
                 )
 
     state.snapshots["approved_tool_calls"] = approved
+
+
+async def _propose_verified_patch_node(
+    state: AgentState,
+    provider: ChatProvider,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    if not _verified_editing_enabled(settings) or not _mentions_verified_edit_request(state):
+        return
+    if state.patch_proposal is not None:
+        return
+
+    state.loop_stage = "propose_verified_patch"
+    yield _event(state, "patch_generation_started", "propose_verified_patch", "Generating verified patch proposal")
+    raw = await provider.complete(
+        [
+            ChatMessage(role="system", content=PATCH_SYSTEM_PROMPT),
+            ChatMessage(role="user", content=patch_user_prompt(state)),
+        ],
+        temperature=float(_setting(settings, "temperature", 0.2)),
+        max_tokens=int(_setting(settings, "patch_max_tokens", 1400)),
+    )
+    try:
+        request = extract_patch_request(raw)
+        proposal = await _build_and_store_patch_proposal(state, deps, request)
+    except PatchProposalError as exc:
+        yield _event(
+            state,
+            "patch_generation_skipped",
+            "propose_verified_patch",
+            "No valid patch proposal was produced",
+            {"reason": str(exc)},
+        )
+        return
+
+    yield _event(
+        state,
+        "patch_proposed",
+        "propose_verified_patch",
+        "Verified patch proposal is ready for review",
+        proposal,
+    )
+    yield _event(
+        state,
+        "patch_approval_required",
+        "propose_verified_patch",
+        "Patch proposal requires user approval before applying",
+        proposal,
+    )
+
+
+async def _propose_patch_from_tool_arguments(
+    state: AgentState,
+    deps: AgentDeps,
+    arguments: Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    request = _patch_request_from_apply_arguments(arguments)
+    try:
+        proposal = await _build_and_store_patch_proposal(state, deps, request)
+    except PatchProposalError as exc:
+        yield _event(
+            state,
+            "tool_call_completed",
+            "execute_tools",
+            "apply_text_edit converted to patch proposal failed",
+            {"name": "apply_text_edit", "blocked": True, "reason": str(exc)},
+        )
+        return
+
+    state.tool_calls.append(
+        ToolCallRecord(
+            name="apply_text_edit",
+            arguments=dict(arguments),
+            blocked=True,
+            reason="awaiting_user_approval",
+            result=proposal,
+        )
+    )
+    yield _event(
+        state,
+        "patch_proposed",
+        "execute_tools",
+        "apply_text_edit converted to a verified patch proposal",
+        proposal,
+    )
+    yield _event(
+        state,
+        "patch_approval_required",
+        "execute_tools",
+        "Patch proposal requires user approval before applying",
+        proposal,
+    )
+
+
+async def _build_and_store_patch_proposal(
+    state: AgentState,
+    deps: AgentDeps,
+    request: PatchRequest,
+) -> dict[str, Any]:
+    async def call_tool(name: str, arguments: dict[str, Any]) -> Mapping[str, Any]:
+        return await _call_tool(deps.tool_registry, name, arguments)
+
+    proposal = await build_patch_proposal(
+        request,
+        session_id=state.session_id,
+        run_id=state.run_id,
+        call_tool=call_tool,
+    )
+    stored = await _call_optional(deps.persistence, "create_patch_proposal", proposal=proposal)
+    public = (
+        (stored or proposal).to_public_dict()
+        if hasattr(stored or proposal, "to_public_dict")
+        else proposal.model_dump(mode="json")
+    )
+    state.patch_proposal = public
+    state.awaiting_approval = True
+    state.snapshots["patch_proposal"] = public
+    state.snapshots["awaiting_approval"] = True
+    return public
+
+
+def _patch_request_from_apply_arguments(arguments: Mapping[str, Any]) -> PatchRequest:
+    new_text = _first_present(arguments.get("new_text"), arguments.get("new"))
+    edit = PatchEdit(
+        path=str(arguments.get("path") or ""),
+        expected_hash=str(arguments.get("expected_hash") or ""),
+        old_text=_first_present(arguments.get("old_text"), arguments.get("old")),
+        line_start=arguments.get("line_start"),
+        line_end=arguments.get("line_end"),
+        new_text=str(new_text or ""),
+        reason="Model requested apply_text_edit; converted to verified editing proposal.",
+    )
+    return PatchRequest(summary=f"Proposed edit for {edit.path}", edits=[edit])
 
 
 async def _respond_node(
@@ -1610,256 +1810,36 @@ def _mentions_format(task_lc: str, plan_lc: str) -> bool:
     return any(marker in text for marker in ("ruff format", "format", "格式"))
 
 
-_CODE_CHANGE_MARKERS = (
-    "edit",
-    "modify",
-    "fix",
-    "refactor",
-    "implement",
-    "change",
-    "write code",
-    "修改",
-    "修复",
-    "实现",
-    "重构",
-    "改代码",
-)
-_FAILING_TEST_MARKERS = (
-    "failing test",
-    "failed test",
-    "test fails",
-    "test failure",
-    "red test",
-    "pytest failed",
-    "pytest failure",
-    "失败测试",
-    "测试失败",
-    "失败的测试",
-    "红灯测试",
-)
-_IRON_LAW_WARNING_MARKERS = (
-    "read-only",
-    "read only",
-    "readonly",
-    "explore",
-    "exploration",
-    "inspect only",
-    "skip tests",
-    "skip testing",
-    "without tests",
-    "只读",
-    "探索",
-    "仅查看",
-    "不要修改",
-    "跳过测试",
-    "不用测试",
-)
-_QUALITY_TOOL_NAMES = {"run_pytest", "run_ruff_check", "run_ruff_format_check"}
-_EDIT_PROOF_TOOL_NAMES = {"prepare_edit", "get_file_hash"}
+def _verified_editing_enabled(settings: AgentSettings | Mapping[str, Any]) -> bool:
+    return bool(_setting(settings, "verified_editing_enabled", False))
 
 
-def _iron_law_decision(
-    state: AgentState,
-    proposed: Iterable[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    skill_names = {str(skill.get("name", "")).lower() for skill in state.selected_skills}
-    proposed_calls = list(proposed or [])
-    production_paths = [
-        path
-        for call in proposed_calls
-        if str(call.get("name", "")) == "apply_text_edit"
-        for path in [_normalize_protocol_path(dict(call.get("arguments") or {}).get("path"))]
-        if path and _is_production_path(path)
-    ]
-    if "iron-law" not in skill_names and not production_paths:
-        return {"action": "none"}
-
+def _mentions_verified_edit_request(state: AgentState) -> bool:
     text = f"{state.user_input}\n{state.plan}".lower()
-    has_code_change_intent = any(marker in text for marker in _CODE_CHANGE_MARKERS)
-    if not has_code_change_intent and not production_paths:
-        return {"action": "none"}
-    if _has_failing_test_signal(state):
-        return {"action": "none", "reason": "failing_test_signal_present"}
-
-    warning_only = any(marker in text for marker in _IRON_LAW_WARNING_MARKERS)
-    action = "warning" if warning_only else "blocked"
-    return {
-        "action": action,
-        "reason": "production_edit_without_failing_test_signal",
-        "current_task_priority": "user_input",
-        "production_paths": production_paths,
-        "warning_only": warning_only,
-    }
-
-
-def _new_tool_protocol_state(state: AgentState) -> dict[str, Any]:
-    protocol_state: dict[str, Any] = {
-        "edit_proofs": set(),
-        "previews": set(),
-    }
-    for record in state.tool_calls:
-        if not record.blocked and _tool_result_ok(record.result):
-            _record_tool_protocol_success(
-                protocol_state,
-                record.name,
-                record.arguments,
-                record.result,
-            )
-    return protocol_state
-
-
-def _tool_protocol_violation(
-    state: AgentState,
-    name: str,
-    arguments: Mapping[str, Any],
-    protocol_state: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    if name != "apply_text_edit":
-        return None
-
-    path = _normalize_protocol_path(arguments.get("path"))
-    expected_hash = _normalize_protocol_hash(arguments.get("expected_hash"))
-    if not path:
-        return {"reason": "apply_text_edit_missing_path"}
-    if not expected_hash:
-        return {"reason": "apply_text_edit_missing_expected_hash", "path": path}
-
-    iron_law = _iron_law_decision(state, [{"name": name, "arguments": dict(arguments)}])
-    if iron_law["action"] == "blocked":
-        return {"reason": "iron_law_blocked", "path": path, "expected_hash": expected_hash}
-
-    key = (path, expected_hash)
-    has_edit_proof = key in protocol_state.get("edit_proofs", set())
-    has_preview = key in protocol_state.get("previews", set())
-    if not has_edit_proof or not has_preview:
-        missing = []
-        if not has_edit_proof:
-            missing.append("prepare_edit_or_get_file_hash")
-        if not has_preview:
-            missing.append("preview_patch")
-        return {
-            "reason": "apply_text_edit_protocol_incomplete",
-            "path": path,
-            "expected_hash": expected_hash,
-            "missing": missing,
-        }
-
-    return None
-
-
-def _record_tool_protocol_success(
-    protocol_state: dict[str, Any],
-    name: str,
-    arguments: Mapping[str, Any],
-    result: Any,
-) -> None:
-    if name not in _EDIT_PROOF_TOOL_NAMES and name != "preview_patch":
-        return
-
-    path = _normalize_protocol_path(
-        _first_present(
-            arguments.get("path"),
-            _extract_protocol_field(result, ("path", "file_path", "target_path")),
-        )
-    )
-    expected_hash = _normalize_protocol_hash(
-        _first_present(
-            arguments.get("expected_hash"),
-            _extract_protocol_field(
-                result,
-                ("expected_hash", "hash", "file_hash", "sha256", "digest", "current_hash"),
-            ),
-        )
-    )
-    if not path or not expected_hash:
-        return
-
-    key = (path, expected_hash)
-    if name in _EDIT_PROOF_TOOL_NAMES:
-        protocol_state.setdefault("edit_proofs", set()).add(key)
-    elif name == "preview_patch":
-        protocol_state.setdefault("previews", set()).add(key)
-
-
-def _has_failing_test_signal(state: AgentState) -> bool:
-    text = f"{state.user_input}\n{state.plan}".lower()
-    if any(marker in text for marker in _FAILING_TEST_MARKERS):
-        return True
     return any(
-        record.name in _QUALITY_TOOL_NAMES and _tool_result_failed(record.result)
-        for record in state.tool_calls
-        if not record.blocked
+        marker in text
+        for marker in (
+            "edit",
+            "modify",
+            "fix",
+            "refactor",
+            "implement",
+            "change",
+            "patch",
+            "write code",
+            "修改",
+            "修复",
+            "实现",
+            "重构",
+        )
     )
-
-
-def _tool_result_failed(result: Any) -> bool:
-    if isinstance(result, Mapping):
-        for key in ("ok", "success", "passed"):
-            if key in result:
-                return not bool(result[key])
-        for key in ("exit_code", "returncode", "status_code"):
-            if key in result:
-                try:
-                    return int(result[key]) != 0
-                except (TypeError, ValueError):
-                    return False
-        if bool(result.get("failed", False)):
-            return True
-        nested = result.get("result")
-        if isinstance(nested, Mapping):
-            return _tool_result_failed(nested)
-    return False
-
-
-def _extract_protocol_field(value: Any, names: Iterable[str]) -> Any:
-    if not isinstance(value, Mapping):
-        return None
-    names_set = set(names)
-    for name in names_set:
-        if value.get(name) is not None:
-            return value[name]
-    for nested_name in ("result", "data", "metadata"):
-        nested = value.get(nested_name)
-        if isinstance(nested, Mapping):
-            found = _extract_protocol_field(nested, names_set)
-            if found is not None:
-                return found
-    return None
 
 
 def _first_present(*values: Any) -> Any:
     for value in values:
-        if value is not None and value != "":
+        if value not in (None, ""):
             return value
     return None
-
-
-def _normalize_protocol_path(value: Any) -> str | None:
-    if value is None:
-        return None
-    path = str(value).strip().replace("\\", "/")
-    while path.startswith("./"):
-        path = path[2:]
-    return path or None
-
-
-def _normalize_protocol_hash(value: Any) -> str | None:
-    if value is None:
-        return None
-    expected_hash = str(value).strip()
-    return expected_hash or None
-
-
-def _is_production_path(path: str) -> bool:
-    normalized = _normalize_protocol_path(path) or ""
-    parts = normalized.lower().split("/")
-    filename = parts[-1] if parts else ""
-    return not (
-        "tests" in parts
-        or filename.startswith("test_")
-        or filename.endswith("_test.py")
-        or normalized.lower().endswith(".md")
-    )
 
 
 def _extract_path_hint(text: str) -> str | None:

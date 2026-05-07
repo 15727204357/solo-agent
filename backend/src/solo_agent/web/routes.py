@@ -6,11 +6,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from solo_agent.memory import MemoryGovernanceError
 from solo_agent.settings import Settings, get_settings
+from solo_agent.tools import create_default_registry
+from solo_agent.verified_editing import apply_approved_patch
 from solo_agent.web.events import encode_sse
 from solo_agent.web.runner import AgentRunner
 from solo_agent.web.store import SessionRepository, SQLiteSessionRepository
@@ -32,6 +35,22 @@ class CreateRunRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     memory_enabled: bool | None = None
     conversation_history_enabled: bool | None = None
+
+
+class UpdateMemoryCandidateRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=2200)
+    target: str | None = Field(default=None, pattern="^(memory|user|skill)$")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    metadata: dict[str, object] | None = None
+
+
+class ApproveMemoryCandidateRequest(BaseModel):
+    resolution: str = Field(default="add", pattern="^(add|replace|merge)$")
+    content: str | None = Field(default=None, min_length=1, max_length=8000)
+
+
+class MemoryDecisionRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 def get_repository() -> SessionRepository:
@@ -133,6 +152,110 @@ async def list_messages(
     return {"items": await repo.list_messages(session_id, limit=bounded_limit)}
 
 
+@router.get("/api/memory/inbox")
+async def list_memory_inbox(
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    candidate_status: str | None = Query(default=None, alias="status"),
+    target: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    bounded_limit = max(1, min(limit, 200))
+    status_value = candidate_status or "pending"
+    return {
+        "items": await repo.list_memory_candidates(
+            status=status_value,
+            target=target,
+            limit=bounded_limit,
+        )
+    }
+
+
+@router.patch("/api/memory/candidates/{candidate_id}")
+async def update_memory_candidate(
+    candidate_id: str,
+    request: Request,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    body = await parse_body(request, UpdateMemoryCandidateRequest)
+    try:
+        candidate = await repo.update_memory_candidate(
+            candidate_id,
+            content=body.content,
+            target=body.target,
+            confidence=body.confidence,
+            metadata=body.metadata,
+        )
+    except MemoryGovernanceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if candidate is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory candidate not found")
+    return candidate
+
+
+@router.post("/api/memory/candidates/{candidate_id}/approve")
+async def approve_memory_candidate(
+    candidate_id: str,
+    request: Request,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    body = await parse_body(request, ApproveMemoryCandidateRequest)
+    try:
+        return await repo.approve_memory_candidate(
+            candidate_id,
+            resolution=body.resolution,
+            content=body.content,
+        )
+    except MemoryGovernanceError as exc:
+        detail = str(exc)
+        code = status.HTTP_409_CONFLICT if detail != "Memory candidate not found" else status.HTTP_404_NOT_FOUND
+        raise HTTPException(status_code=code, detail=detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/api/memory/candidates/{candidate_id}/reject")
+async def reject_memory_candidate(
+    candidate_id: str,
+    request: Request,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    body = await parse_body(request, MemoryDecisionRequest)
+    candidate = await repo.reject_memory_candidate(candidate_id, reason=body.reason)
+    if candidate is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory candidate not found")
+    return candidate
+
+
+@router.get("/api/memory/entries")
+async def list_memory_entries(
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    target: str | None = None,
+    include_inactive: bool = False,
+    limit: int = 100,
+) -> dict[str, object]:
+    bounded_limit = max(1, min(limit, 200))
+    return {
+        "items": await repo.list_memory_entries(
+            target=target,
+            include_inactive=include_inactive,
+            limit=bounded_limit,
+        )
+    }
+
+
+@router.post("/api/memory/entries/{entry_id}/revoke")
+async def revoke_memory_entry(
+    entry_id: str,
+    request: Request,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    body = await parse_body(request, MemoryDecisionRequest)
+    entry = await repo.revoke_memory_entry(entry_id, reason=body.reason)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory entry not found")
+    return entry
+
+
 @router.post("/api/sessions/{session_id}/runs", status_code=status.HTTP_202_ACCEPTED)
 async def create_run(
     session_id: str,
@@ -168,6 +291,134 @@ async def create_run(
     }
 
 
+@router.get("/api/sessions/{session_id}/runs/{run_id}/patches")
+async def list_run_patches(
+    session_id: str,
+    run_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    run = await repo.get_run(session_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    patches = await repo.list_patch_proposals(session_id, run_id)
+    return {"items": [patch.to_public_dict() for patch in patches]}
+
+
+@router.get("/api/sessions/{session_id}/runs/{run_id}/patches/{patch_id}")
+async def get_run_patch(
+    session_id: str,
+    run_id: str,
+    patch_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    patch = await repo.get_patch_proposal(session_id, run_id, patch_id)
+    if patch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch proposal not found")
+    return patch.to_public_dict()
+
+
+@router.post("/api/sessions/{session_id}/runs/{run_id}/patches/{patch_id}/reject")
+async def reject_run_patch(
+    session_id: str,
+    run_id: str,
+    patch_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    patch = await repo.get_patch_proposal(session_id, run_id, patch_id)
+    if patch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch proposal not found")
+    if patch.status != "pending":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Patch proposal is not pending")
+
+    updated = await repo.update_patch_proposal(
+        session_id,
+        run_id,
+        patch_id,
+        status="rejected",
+        error="rejected by user",
+        decided=True,
+    )
+    await repo.append_event(
+        session_id,
+        run_id,
+        "patch_rejected",
+        "Patch proposal rejected by user.",
+        {"patch_id": patch_id},
+    )
+    await repo.mark_run_status(session_id, run_id, "cancelled")
+    return (updated or patch).to_public_dict()
+
+
+@router.post("/api/sessions/{session_id}/runs/{run_id}/patches/{patch_id}/approve")
+async def approve_run_patch(
+    session_id: str,
+    run_id: str,
+    patch_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    patch = await repo.get_patch_proposal(session_id, run_id, patch_id)
+    if patch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patch proposal not found")
+    if patch.status != "pending":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Patch proposal is not pending")
+
+    await repo.update_patch_proposal(session_id, run_id, patch_id, status="approved", decided=True)
+    await repo.append_event(
+        session_id,
+        run_id,
+        "patch_apply_started",
+        "Applying approved patch proposal.",
+        {"patch_id": patch_id},
+    )
+    registry = create_default_registry(settings.workspace_root)
+
+    async def call_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
+        return registry.call(name, arguments)
+
+    applied = await apply_approved_patch(patch.model_copy(update={"status": "approved"}), call_tool=call_tool)
+    updated = await repo.update_patch_proposal(
+        session_id,
+        run_id,
+        patch_id,
+        status=applied.status,
+        apply_results=[dict(item) for item in applied.apply_results],
+        verification=applied.verification.model_dump(mode="json") if applied.verification else None,
+        error=applied.error,
+    )
+    if applied.apply_results and applied.status != "failed":
+        await repo.append_event(
+            session_id,
+            run_id,
+            "patch_applied",
+            "Patch proposal applied to the workspace.",
+            {"patch_id": patch_id, "apply_results": applied.apply_results},
+        )
+    if applied.verification is not None:
+        await repo.append_event(
+            session_id,
+            run_id,
+            "verification_started",
+            "Running pytest and ruff verification.",
+            {"patch_id": patch_id},
+        )
+        await repo.append_event(
+            session_id,
+            run_id,
+            "verification_completed",
+            "Patch verification completed.",
+            {"patch_id": patch_id, "verification": applied.verification.model_dump(mode="json")},
+        )
+    await repo.mark_run_status(
+        session_id,
+        run_id,
+        "completed" if applied.status == "applied" else "failed",
+    )
+    public = (updated or applied).to_public_dict()
+    public["ok"] = applied.status == "applied"
+    return public
+
+
 @router.get("/api/sessions/{session_id}/runs/{run_id}/events")
 async def stream_run_events(
     session_id: str,
@@ -192,7 +443,7 @@ async def stream_run_events(
                 yield ": heartbeat\n\n"
             else:
                 yield encode_sse(event)
-                if event.type in {"completed", "failed", "cancelled", "run_completed"}:
+                if event.type in {"completed", "failed", "cancelled", "run_completed", "patch_approval_required"}:
                     break
             await asyncio.sleep(0)
 

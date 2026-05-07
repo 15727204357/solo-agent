@@ -24,6 +24,15 @@ with the current request, follow the current request.
 Be honest about missing context. Do not claim to have modified files."""
 
 
+PATCH_SYSTEM_PROMPT = """You are Solo Agent's verified editing planner.
+Return only JSON for a proposed patch. Do not include Markdown.
+The JSON shape is:
+{"summary":"short summary","edits":[{"path":"relative/path.py","old_text":"exact current text",
+"new_text":"replacement text","reason":"why"}]}
+Use old_text when possible. Use line_start and line_end only when exact old_text is not practical.
+If no safe patch can be proposed from the available context, return {"summary":"","edits":[]}."""
+
+
 def sanitize_context(text: str) -> str:
     """Strip memory-context fence escape sequences from recalled memory."""
 
@@ -85,6 +94,17 @@ def responder_user_prompt(state: AgentState) -> str:
             f"Collected context:\n{state.context or '(no context available)'}",
             f"Tool calls:\n{[call.__dict__ for call in state.tool_calls] or '(no tool calls)'}",
             "Write the final response for the Web UI.",
+        ]
+    )
+
+
+def patch_user_prompt(state: AgentState) -> str:
+    return "\n\n".join(
+        [
+            f"User task:\n{state.user_input}",
+            f"Plan:\n{state.plan or '(no plan produced)'}",
+            f"Collected context and tool outputs:\n{state.context or '(no context available)'}",
+            "Propose the smallest safe patch as structured JSON.",
         ]
     )
 

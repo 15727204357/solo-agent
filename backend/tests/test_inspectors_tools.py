@@ -328,3 +328,37 @@ def test_skill_tools_sanitize_memory_context_fence(tmp_path: Path) -> None:
     assert "NOT new user input" in loaded["result"]["system_note"]
     assert selected["ok"] is True
     assert selected["result"]["skills"][0]["path"] == "skills/python/SKILL.md"
+
+
+def test_select_relevant_skills_prioritizes_behavior_skills_over_workflow_ties(tmp_path: Path) -> None:
+    behavior_dir = tmp_path / "skills" / "z_behavior"
+    workflow_dir = tmp_path / "skills" / "a_workflow"
+    behavior_dir.mkdir(parents=True)
+    workflow_dir.mkdir(parents=True)
+    (behavior_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: iron-law\n"
+        "description: Use for code change tasks.\n"
+        "category: behavior\n"
+        "triggers: [code]\n"
+        "---\n"
+        "# Iron Law\n",
+        encoding="utf-8",
+    )
+    (workflow_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: python-workflow\n"
+        "description: Use for code change tasks.\n"
+        "category: workflow\n"
+        "triggers: [code]\n"
+        "---\n"
+        "# Python Workflow\n",
+        encoding="utf-8",
+    )
+    registry = create_default_registry(tmp_path)
+
+    selected = registry.call("select_relevant_skills", {"task": "code", "max_skills": 1})
+
+    assert selected["ok"] is True
+    assert selected["result"]["skills"][0]["name"] == "iron-law"
+    assert selected["result"]["skills"][0]["category"] == "behavior"

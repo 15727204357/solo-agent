@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     auxiliary_compression_base_url: str = "http://localhost:11434"
     memory_enabled: bool = True
     conversation_history_enabled: bool = True
+    verified_editing_enabled: bool = True
+    patch_max_tokens: int = 1400
 
     @field_validator("workspace_root")
     @classmethod

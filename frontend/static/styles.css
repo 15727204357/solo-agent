@@ -614,6 +614,76 @@ label {
   overflow-wrap: anywhere;
 }
 
+.memory-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-actions,
+.memory-candidate-actions,
+.memory-candidate-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.memory-actions {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memory-list,
+.memory-entry-list {
+  display: grid;
+  gap: 8px;
+}
+
+.memory-candidate,
+.memory-entry {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 9px;
+}
+
+.memory-candidate-header span,
+.memory-candidate-details {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.memory-candidate textarea {
+  min-height: 88px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.memory-candidate-actions select {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 0 8px;
+}
+
+.memory-entry p {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.memory-entries summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.memory-entries[open] summary {
+  margin-bottom: 8px;
+}
+
 .tool-list,
 .events,
 .raw-events {
