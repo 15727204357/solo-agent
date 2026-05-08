@@ -28,6 +28,7 @@ from solo_agent.agent.state import AgentState, ToolCallRecord
 from solo_agent.context import ContextManager, ContextTokenEstimator, SubdirectoryHintTracker, TaskListState
 from solo_agent.providers import ChatMessage, ChatProvider
 from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequest, build_patch_proposal, extract_patch_request
+from solo_agent.workflow.parallelism import evaluate_independence, extract_task_candidates_from_text
 
 _BEHAVIOR_POLICY = BehaviorPolicy()
 
@@ -1381,6 +1382,55 @@ async def _persist_context_summary(
             "phase": phase,
             "context_stats": context_stats,
         },
+    )
+
+
+async def _parallelism_gate_stage(
+    state: AgentState,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    state.loop_stage = "parallelism_gate"
+    yield _event(
+        state,
+        "parallelism_gate_started",
+        "parallelism_gate",
+        "Evaluating parallel execution independence conditions",
+        {"conditions": [
+            "problem_domain_independence",
+            "context_independence",
+            "write_set_independence",
+            "verification_independence",
+        ]},
+    )
+
+    source_text = "\n\n".join(
+        part
+        for part in [
+            state.user_input,
+            state.plan,
+            state.deep_plan,
+        ]
+        if part
+    )
+    tasks = extract_task_candidates_from_text(source_text)
+    decision = evaluate_independence(
+        tasks,
+        max_parallel=int(_setting(settings, "max_concurrent_subagents", 3)),
+    )
+
+    state.task_candidates = [task.to_dict() for task in tasks]
+    state.parallelism_decision = decision.to_dict()
+    state.execution_strategy = decision.mode
+    state.snapshots["task_candidates"] = state.task_candidates
+    state.snapshots["parallelism_decision"] = state.parallelism_decision
+    state.snapshots["execution_strategy"] = state.execution_strategy
+
+    yield _event(
+        state,
+        "parallelism_gate_completed",
+        "parallelism_gate",
+        f"Parallelism decision: {decision.mode}",
+        decision.to_dict(),
     )
 
 

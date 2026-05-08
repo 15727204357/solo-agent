@@ -34,6 +34,9 @@ class AgentState:
     selected_skills: list[dict[str, Any]] = field(default_factory=list)
     skill_budget: dict[str, Any] = field(default_factory=dict)
     behavior_policy: dict[str, Any] = field(default_factory=dict)
+    task_candidates: list[dict[str, Any]] = field(default_factory=list)
+    parallelism_decision: dict[str, Any] = field(default_factory=dict)
+    execution_strategy: str = "serial"
     context: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     patch_proposal: dict[str, Any] | None = None
@@ -69,6 +72,9 @@ class AgentState:
             "selected_skills": self.selected_skills,
             "skill_budget": self.skill_budget,
             "behavior_policy": self.behavior_policy,
+            "task_candidates": self.task_candidates,
+            "parallelism_decision": self.parallelism_decision,
+            "execution_strategy": self.execution_strategy,
             "context": self.context,
             "tool_calls": [
                 {

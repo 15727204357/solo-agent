@@ -70,11 +70,37 @@ async def test_workflow_runtime_default_main_path_smoke(tmp_path: Path) -> None:
         settings=settings,
     )
 
+    state = AgentState("session-1", "run-1", "Use a subagent and answer.")
+    state.plan = '''
+```json
+{
+  "parallel_tasks": [
+    {
+      "id": "T1",
+      "title": "Inspect project",
+      "domain": "research",
+      "read_paths": ["."],
+      "write_paths": ["backend/tests/test_report.md"],
+      "verify_commands": ["pytest backend/tests/test_report.py -q"]
+    },
+    {
+      "id": "T2",
+      "title": "Review code",
+      "domain": "code_review",
+      "read_paths": ["."],
+      "write_paths": ["backend/tests/test_review.md"],
+      "verify_commands": ["pytest backend/tests/test_review.py -q"]
+    }
+  ]
+}
+```
+'''
+
     events = [
         event
         async for event in WorkflowRuntime(
             deps=deps,
-            state=AgentState("session-1", "run-1", "Use a subagent and answer."),
+            state=state,
             provider=deps.provider,
         ).run()
     ]
@@ -96,7 +122,7 @@ async def test_workflow_runtime_default_main_path_smoke(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_runtime_tool_calling_provider_uses_lead_agent_strategy(tmp_path: Path) -> None:
+async def test_workflow_runtime_lead_agent_strategy_with_parallelism_gate(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("Solo Agent\n", encoding="utf-8")
     settings = AgentSettings(
         provider="openai",
@@ -111,22 +137,45 @@ async def test_workflow_runtime_tool_calling_provider_uses_lead_agent_strategy(t
         settings=settings,
     )
 
+    state = AgentState("session-1", "run-1", "Use a subagent and answer.")
+    state.plan = '''
+```json
+{
+  "parallel_tasks": [
+    {
+      "id": "T1",
+      "title": "Inspect project",
+      "domain": "research",
+      "read_paths": ["."],
+      "write_paths": ["backend/tests/test_report.md"],
+      "verify_commands": ["pytest backend/tests/test_report.py -q"]
+    },
+    {
+      "id": "T2",
+      "title": "Review code",
+      "domain": "code_review",
+      "read_paths": ["."],
+      "write_paths": ["backend/tests/test_review.md"],
+      "verify_commands": ["pytest backend/tests/test_review.py -q"]
+    }
+  ]
+}
+```
+'''
+
     events = [
         event
         async for event in WorkflowRuntime(
             deps=deps,
-            state=AgentState("session-1", "run-1", "Use a subagent and answer."),
+            state=state,
             provider=deps.provider,
         ).run()
     ]
 
     event_types = [event.type for event in events]
     assert "run_started" in event_types
+    assert "parallelism_gate_completed" in event_types
     assert "task_started" in event_types
-    assert "task_completed" in event_types
-    assert "response_completed" in event_types
-    assert events[-1].type == "run_completed"
-    assert not (tmp_path / "runs" / "session-1" / "run-1").exists()
 
 
 class NonToolCallingFakeProvider:

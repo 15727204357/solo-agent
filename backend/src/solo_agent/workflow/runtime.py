@@ -19,6 +19,7 @@ from solo_agent.workflow.stages import (
     _execute_tools_node,
     _inspect_node,
     _load_builtin_memory_stage,
+    _parallelism_gate_stage,
     _persist_snapshot_stage,
     _plan_mode_path,
     _plan_node,
@@ -115,6 +116,8 @@ class WorkflowRuntime:
             yield event
         async for event in _task_state_stage(state):
             yield event
+        async for event in _parallelism_gate_stage(state, settings):
+            yield event
         async for event in _collect_context_node(state, self._deps, settings):
             yield event
         async for event in _inspect_node(state, self._deps):
@@ -151,6 +154,8 @@ class WorkflowRuntime:
         wf_state: WorkflowState,
         settings: Any,
     ) -> AsyncIterator[AgentEvent]:
+        async for event in _parallelism_gate_stage(self._agent_state, settings):
+            yield event
         async for event in _collect_context_node(self._agent_state, self._deps, settings):
             yield event
         async for event in _inspect_node(self._agent_state, self._deps):
@@ -198,8 +203,12 @@ class WorkflowRuntime:
 
         try:
             await self._emit("run_started", node="workflow")
+            allow_parallel_task_tool = (
+                bool(settings.subagent_enabled)
+                and self._agent_state.execution_strategy == "parallel"
+            )
             agent = factory.create_agent(
-                include_task=settings.subagent_enabled,
+                include_task=allow_parallel_task_tool,
                 allowed_names=self._lead_tool_allowlist(),
                 state=wf_state,
             )
