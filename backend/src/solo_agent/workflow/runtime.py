@@ -8,7 +8,13 @@ from typing import Any
 
 from solo_agent.agent.events import AgentEvent
 from solo_agent.agent.state import AgentState
+from solo_agent.workflow.checkpoints import create_checkpointer
 from solo_agent.workflow.factory import LeadAgentFactory
+from solo_agent.workflow.graph_state import (
+    agent_state_from_graph_data,
+    initial_graph_state,
+)
+from solo_agent.workflow.graphs import build_text_provider_graph
 from solo_agent.workflow.langchain_adapter import LangChainChatAdapter
 from solo_agent.workflow.sandbox.local import LocalSandboxProvider
 from solo_agent.workflow.stages import (
@@ -93,8 +99,11 @@ class WorkflowRuntime:
         elif self._uses_lead_agent_strategy(settings):
             async for event in self._run_lead_agent_strategy(wf_state, settings):
                 yield event
+        elif self._use_langgraph_engine(settings):
+            async for event in self._run_langgraph_text_provider_strategy(settings):
+                yield event
         else:
-            async for event in self._run_text_provider_strategy(settings):
+            async for event in self._run_text_provider_strategy_legacy(settings):
                 yield event
 
         if self._agent_state.blocked:
@@ -110,7 +119,7 @@ class WorkflowRuntime:
             yield event
         yield self._run_completed_event("Workflow run completed", wf_state.snapshot())
 
-    async def _run_text_provider_strategy(self, settings: Any) -> AsyncIterator[AgentEvent]:
+    async def _run_text_provider_strategy_legacy(self, settings: Any) -> AsyncIterator[AgentEvent]:
         state = self._agent_state
         async for event in _plan_node(state, self._provider, settings):
             yield event
@@ -148,6 +157,50 @@ class WorkflowRuntime:
             yield event
         async for event in _respond_node(state, self._provider, settings):
             yield event
+
+    def _use_langgraph_engine(self, settings: Any) -> bool:
+        engine = getattr(settings, "workflow_engine", "legacy")
+        return engine == "langgraph"
+
+    async def _run_langgraph_text_provider_strategy(self, settings: Any) -> AsyncIterator[AgentEvent]:
+        gs = initial_graph_state(self._agent_state)
+        graph = build_text_provider_graph(
+            provider=self._provider,
+            deps=self._deps,
+            settings=settings,
+        )
+        checkpointer = await create_checkpointer(settings)
+        compiled = graph.compile(checkpointer=checkpointer if checkpointer else False)
+
+        thread_id = self._agent_state.run_id
+        config = {"configurable": {"thread_id": thread_id}}
+
+        seen_event_keys: set[tuple[str, str, str]] = set()
+
+        async for update in compiled.astream(gs, config=config, stream_mode="values"):
+            if not isinstance(update, dict):
+                continue
+
+            for event_dict in update.get("events", []):
+                if isinstance(event_dict, dict):
+                    key = (
+                        event_dict.get("type", ""),
+                        event_dict.get("session_id", ""),
+                        event_dict.get("created_at", ""),
+                    )
+                    if key not in seen_event_keys:
+                        seen_event_keys.add(key)
+                        yield AgentEvent(
+                            type=event_dict.get("type", ""),
+                            session_id=event_dict.get("session_id", ""),
+                            run_id=event_dict.get("run_id", ""),
+                            node=event_dict.get("node", "workflow"),
+                            message=event_dict.get("message", ""),
+                            data=event_dict.get("data", {}),
+                        )
+
+            if "agent_state" in update:
+                self._agent_state = agent_state_from_graph_data(update["agent_state"])
 
     async def _run_lead_agent_strategy(
         self,

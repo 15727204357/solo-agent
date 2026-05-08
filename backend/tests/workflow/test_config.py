@@ -15,8 +15,12 @@ from solo_agent.providers import ChatMessage, ProviderChunk
 from solo_agent.settings import Settings
 
 
-def test_workflow_engine_is_not_user_visible_configuration():
-    assert "workflow_engine" not in Settings.model_fields
+def test_workflow_engine_defaults():
+    settings = Settings()
+    assert settings.workflow_engine == "legacy"
+    assert settings.workflow_checkpointer == "memory"
+
+def test_workflow_engine_is_not_in_agent_settings():
     assert "workflow_engine" not in {field.name for field in dataclass_fields(AgentSettings)}
 
 
