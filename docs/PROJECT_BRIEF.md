@@ -39,13 +39,12 @@ Solo Agent 的团队工作流闭环是：
 - 并行前提：superpowers 的 4 条独立性条件全部满足才并行，否则串行。
 - 计划层：superpowers `writing-plans`，要求无占位符、2-5 分钟粒度、内联自审。
 - 审查机制：双轮审查，第一轮规范合规，第二轮代码质量。
-- 错误处理：本地 Hermes 风格 ErrorClassifier 4 分类 + 本地 goose 风格 RepetitionInspector；单次 run 内三次相同异常失败等于架构问题。
+- 错误处理：本地 Hermes 风格 ErrorClassifier 4 分类 +goose fix_conversation + max_compaction_attempts=2；单次 run 内三次相同异常失败等于架构问题。
 - 行为层：graph policy engine 强制 superpowers Iron Laws + Karpathy 规则；SKILL.md 只提供 SOP 内容和触发元数据。
 - 上下文层：goose 80% + tool_call_cut_off + SubdirectoryHintTracker。
 - 记忆层：hermes FTS5 + prefetch_all/sync_all/queue_prefetch_all + on_pre_compress hook。
 - 工具层：goose MCP + hermes SKILL.md。
-- 安全层：SecurityInspector + EgressInspector + RepetitionInspector。
-- 恢复机制：goose fix_conversation + max_compaction_attempts=2，优先自动补上下文、补 hash preview、补验证。
+- 安全层：SecurityInspector + EgressInspector +  本地 goose 风格 RepetitionInspector。
 - 代码编辑：oh-my-openagent hash 锚定 + goose Tree-sitter。
 - 持久化：checkpoint 记录从哪里恢复执行。
 - 可观测：callback TimingPoint + 工具进度显示 + snapshot。
