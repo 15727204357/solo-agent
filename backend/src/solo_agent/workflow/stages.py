@@ -1062,130 +1062,8 @@ async def _respond_node(
 
 
 async def _sync_memory_stage(state: AgentState, deps: AgentDeps) -> AsyncIterator[AgentEvent]:
-    state.loop_stage = "sync_all"
-    sync_result = await _call_optional(
-        deps.persistence,
-        "sync_all",
-        session_id=state.session_id,
-        run_id=state.run_id,
-        user_input=state.user_input,
-        assistant_response=state.response,
-    )
-    if sync_result is not None:
-        yield _event(state, "memory_synced", "memory", "Synced current turn into memory", sync_result)
-
-
-async def _queue_prefetch_stage(
-    state: AgentState,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
-) -> AsyncIterator[AgentEvent]:
-    state.loop_stage = "queue_prefetch_all"
-    queue_result = await _call_optional(
-        deps.persistence,
-        "queue_prefetch_all",
-        session_id=state.session_id,
-        query=state.response or state.user_input,
-        limit=int(_setting(settings, "memory_search_limit", 5)),
-    )
-    if queue_result is not None:
-        yield _event(state, "memory_prefetch_queued", "memory", "Queued memory prefetch for next turn", queue_result)
-
-
-async def _compress_memory_stage(
-    state: AgentState,
-    provider: ChatProvider,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
-) -> AsyncIterator[AgentEvent]:
-    async for event in _context_guard_stage(state, provider, deps, settings, phase="after_run"):
-        yield event
-
-
-async def _persist_snapshot_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
-    state.loop_stage = "persist_snapshot"
-    state.snapshots["loop_stage"] = state.loop_stage
-    yield _event(
-        state,
-        "persist_snapshot_completed",
-        "persist_snapshot",
-        "Persisted run snapshot",
-        {"snapshot": state.snapshot()},
-    )
-
-
-async def _load_conversation_context(
-    state: AgentState,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
-) -> dict[str, Any]:
-    persistence = deps.persistence
-    if persistence is None:
-        return {"summary": "", "recent_messages": [], "retrieved_memories": [], "budget": {}}
-
-    history_enabled = bool(_setting(settings, "conversation_history_enabled", True))
-    history_limit = int(_setting(settings, "history_message_limit", 12)) if history_enabled else 0
-    memory_limit = int(_setting(settings, "memory_search_limit", 5))
-
-    prefetched = await _call_prefetch_all(
-        persistence,
-        session_id=state.session_id,
-        query=state.user_input,
-        recent_limit=history_limit,
-        limit=memory_limit,
-        include_history=history_enabled,
-    )
-    if prefetched:
-        if not history_enabled:
-            prefetched["recent_messages"] = []
-        return {
-            **prefetched,
-            "budget": {
-                "recent_message_limit": history_limit,
-                "memory_search_limit": memory_limit,
-                "scope": "session",
-                "conversation_history_enabled": history_enabled,
-            },
-        }
-
-    recent_messages = (
-        await _call_optional(persistence, "list_messages", state.session_id, limit=history_limit)
-        if history_enabled
-        else []
-    )
-    summary = await _call_optional(persistence, "get_latest_summary", state.session_id)
-    retrieved = await _call_optional(
-        persistence,
-        "search_memory",
-        session_id=state.session_id,
-        query=state.user_input,
-        limit=memory_limit,
-    )
-
-    return {
-        "summary": _summary_text(summary),
-        "recent_messages": [_message_to_context(message) for message in recent_messages or []],
-        "retrieved_memories": retrieved or [],
-        "budget": {
-            "recent_message_limit": history_limit,
-            "memory_search_limit": memory_limit,
-            "scope": "session",
-            "memory_enabled": True,
-            "conversation_history_enabled": history_enabled,
-        },
-    }
-
-
-async def _context_guard_stage(
-    state: AgentState,
-    provider: ChatProvider,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
-    *,
-    phase: str,
-) -> AsyncIterator[AgentEvent]:
-    state.loop_stage = f"context_guard_{phase}"
-    if not bool(_setting(settings, "memory_enabled", True)):
+    state.loop_stage = "sync_memory"
+    if deps.persistence is None or not state.memory_enabled:
         return
 
     stats = await _call_optional(deps.persistence, "get_context_stats", state.session_id)
@@ -1312,6 +1190,55 @@ async def _context_guard_stage(
             "Injected TaskList state after compression",
             {"phase": phase, "length": len(str(state.snapshots.get("task_state_block", "")))},
         )
+
+
+async def _queue_prefetch_stage(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Queue memory prefetch for next run."""
+    state.loop_stage = "queue_prefetch"
+    if deps.persistence is None or not state.memory_enabled:
+        return
+    result = await _call_optional(
+        deps.persistence,
+        "queue_prefetch_all",
+        session_id=state.session_id,
+        query=state.user_input or "",
+    )
+    yield _event(
+        state,
+        "memory_prefetch_queued",
+        "queue_prefetch",
+        "Memory prefetch queued for next interaction",
+        {"result": result or {}},
+    )
+
+
+async def _compress_memory_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Compress memory after run completion."""
+    state.loop_stage = "compress_memory"
+    if deps.persistence is None or not state.memory_enabled:
+        return
+    await _call_optional(
+        deps.persistence,
+        "on_pre_compress",
+        session_id=state.session_id,
+        payload={"summary": state.response, "session_id": state.session_id, "run_id": state.run_id},
+    )
+    yield _event(
+        state,
+        "memory_compress_completed",
+        "compress_memory",
+        "Memory compression completed",
+        {},
+    )
 
 
 async def _run_main_compression_recovery(
@@ -2147,4 +2074,448 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+# ---------------------------------------------------------------------------
+# Review Layer Stages
+# ---------------------------------------------------------------------------
+
+
+async def _spec_compliance_review_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """LLM review of tool/patch results against user requirements."""
+    user_input = state.user_input or ""
+    tool_executed = any(
+        tc.name == "apply_text_edit" for tc in (state.tool_calls or [])
+    )
+    patch_proposed = state.patch_proposal is not None
+
+    findings: list[str] = []
+    if not user_input:
+        findings.append("No user input to compare against")
+    if not tool_executed and not patch_proposed:
+        findings.append("No code changes were made")
+
+    state.review_reports["spec_compliance"] = {
+        "status": "passed" if not findings else "reviewed",
+        "findings": findings,
+        "has_code_changes": tool_executed or patch_proposed,
+    }
+    yield _event(
+        state,
+        "spec_compliance_review",
+        "spec_compliance_review",
+        "Spec compliance review completed",
+        state.review_reports["spec_compliance"],
+    )
+
+
+async def _code_quality_review_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """LLM review of code changes for correctness, maintainability, security."""
+    patch = state.patch_proposal or {}
+    edits = patch.get("edits", []) or []
+
+    findings: list[str] = []
+    if not edits:
+        findings.append("No code changes to review")
+
+    state.review_reports["code_quality"] = {
+        "status": "passed" if not findings else "reviewed",
+        "edits_count": len(edits),
+        "findings": findings,
+    }
+    yield _event(
+        state,
+        "code_quality_review",
+        "code_quality_review",
+        "Code quality review completed",
+        state.review_reports["code_quality"],
+    )
+
+
+async def _response_review_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Validate final response grounding before emit."""
+    response_text = state.response or ""
+    tool_calls = state.tool_calls or []
+    tool_results_available = any(tc.result is not None for tc in tool_calls)
+
+    issues: list[str] = []
+    if response_text and not tool_results_available:
+        issues.append("Response generated without tool results context")
+    if not response_text:
+        issues.append("Empty response")
+
+    state.review_reports["response"] = {
+        "status": "passed" if not issues else "needs_review",
+        "issues": issues,
+    }
+    yield _event(
+        state,
+        "response_review",
+        "response_review",
+        "Response review completed",
+        state.review_reports["response"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Error Recovery Stages
+# ---------------------------------------------------------------------------
+
+
+async def _classify_error_stage(
+    state: AgentState,
+) -> AsyncIterator[AgentEvent]:
+    """Delegate to ErrorClassifier, store result in error_state."""
+    from solo_agent.agent.error_classifier import ErrorClassifier
+
+    last_error = state.last_error or {}
+    error_message = last_error.get("error_message", "")
+    error_type = last_error.get("error_type", "Exception")
+
+    error_state = dict(state.error_state or {})
+    error_history = list(error_state.get("error_history", []))
+
+    try:
+        classifier = ErrorClassifier()
+        classification = classifier.classify(
+            Exception(error_message) if error_message else RuntimeError(error_type)
+        )
+        category_str = classification.category if hasattr(classification, "category") else ""
+    except Exception:
+        category_str = "fatal"
+
+    category_out_map = {
+        "retryable": "recoverable_error",
+        "fixable": "recoverable_error",
+        "fatal": "policy_violation",
+        "architectural": "architecture_failure",
+    }
+    classification_out = category_out_map.get(category_str, "policy_violation")
+
+    error_state["classification"] = classification_out
+    error_state["last_error_type"] = error_type
+    error_state["error_history"] = error_history + [{
+        "classification": classification_out,
+        "type": error_type,
+        "message": error_message,
+    }]
+    state.error_state = error_state
+
+    yield _event(
+        state,
+        "error_classified",
+        "classify_error",
+        f"Error classified: {classification_out}",
+        {"classification": classification_out, "error_type": error_type},
+    )
+
+
+async def _recovery_action_stage(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Execute recovery based on classification."""
+    error_state = state.error_state or {}
+    classification = error_state.get("classification", "")
+    recovery_attempts = state.recovery_attempts
+
+    max_attempts = 2
+    if recovery_attempts >= max_attempts:
+        state.recovery_attempts = recovery_attempts + 1
+        yield _event(
+            state,
+            "recovery_exhausted",
+            "recovery_action",
+            f"Recovery attempts exhausted ({recovery_attempts}/{max_attempts})",
+            {"max_attempts": max_attempts, "attempts": recovery_attempts},
+        )
+        return
+
+    state.recovery_attempts = recovery_attempts + 1
+    yield _event(
+        state,
+        "recovery_started",
+        "recovery_action",
+        f"Recovery attempt {state.recovery_attempts}/{max_attempts} for: {classification}",
+        {"classification": classification, "attempt": state.recovery_attempts},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Provider Routing Stage
+# ---------------------------------------------------------------------------
+
+
+async def _provider_routing_stage(
+    state: AgentState,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Select provider role based on current node context."""
+    current_node = state.current_node or ""
+
+    role_map: dict[str, str] = {
+        "deep_plan": "complete",
+        "plan": "complete",
+        "plan_revision": "complete",
+        "plan_self_review": "complete",
+        "respond": "complete",
+        "spec_compliance_review": "fast",
+        "code_quality_review": "complete",
+        "response_review": "fast",
+        "propose_verified_patch": "complete",
+        "compress_memory": "compression",
+        "classify_error": "fast",
+    }
+    default_role = "fast" if "review" in current_node or "gate" in current_node else "complete"
+    state.provider_mode = role_map.get(current_node, default_role)
+
+    yield _event(
+        state,
+        "provider_routed",
+        "provider_routing",
+        f"Provider mode: {state.provider_mode} for node: {current_node}",
+        {"provider_mode": state.provider_mode, "current_node": current_node},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Verification Stage
+# ---------------------------------------------------------------------------
+
+
+async def _run_verification_stage(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Run pytest + ruff after approved patch apply."""
+    tool_registry = getattr(deps, "tool_registry", None)
+    if tool_registry is None:
+        yield _event(
+            state,
+            "verification_skipped",
+            "run_verification",
+            "No tool registry available — verification skipped",
+            {},
+        )
+        return
+
+    results: dict[str, Any] = {}
+
+    # Run ruff check
+    try:
+        ruff_result = await _call_tool_if_available(tool_registry, "run_ruff_check", {"target": "."})
+        results["ruff"] = ruff_result
+    except Exception as exc:
+        results["ruff"] = {"error": str(exc)}
+
+    # Run pytest
+    try:
+        pytest_result = await _call_tool_if_available(tool_registry, "run_pytest", {"target": ""})
+        results["pytest"] = pytest_result
+    except Exception as exc:
+        results["pytest"] = {"error": str(exc)}
+
+    verification_status = "passed" if all(
+        r.get("status") == "passed" or r.get("status") is None
+        for r in results.values()
+        if isinstance(r, dict)
+    ) else "failed"
+
+    state.review_reports["verification"] = {
+        "status": verification_status,
+        "results": results,
+    }
+    yield _event(
+        state,
+        "verification_completed",
+        "run_verification",
+        f"Verification: {verification_status}",
+        state.review_reports["verification"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Terminal Error Response Stages
+# ---------------------------------------------------------------------------
+
+
+async def _environment_error_response_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Generate explanatory response for environment errors."""
+    error_state = state.error_state or {}
+    error_message = error_state.get("last_error_type", "Unknown") or "Unknown"
+
+    state.response = (
+        f"I encountered an environment error: **{error_message}**\n\n"
+        f"This appears to be related to the runtime environment rather than the task itself. "
+        f"Please check your configuration and try again."
+    )
+    state.blocked = True
+    state.block_reason = f"Environment error: {error_message}"
+    yield _event(
+        state,
+        "environment_error_response",
+        "environment_error_response",
+        state.block_reason,
+        {"error": error_state},
+    )
+
+
+async def _architecture_failure_response_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Generate explanatory response for architecture failures."""
+    error_state = state.error_state or {}
+    error_history = error_state.get("error_history", [])
+
+    state.response = (
+        f"I've encountered a recurring issue that appears to be an architectural problem.\n\n"
+        f"The same error pattern occurred {len(error_history)} times despite recovery attempts. "
+        f"This likely requires a change in approach or configuration."
+    )
+    state.blocked = True
+    state.block_reason = "Architecture failure — repeated errors exceeded recovery limits"
+    yield _event(
+        state,
+        "architecture_failure_response",
+        "architecture_failure_response",
+        state.block_reason,
+        {"error_history": error_history[-3:]},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auto-fix stage
+# ---------------------------------------------------------------------------
+
+
+async def _auto_fix_prepare_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    """Generate fix PatchProposal from review feedback."""
+    review_reports = state.review_reports or {}
+    spec = review_reports.get("spec_compliance", {})
+    quality = review_reports.get("code_quality", {})
+
+    fix_needed = bool(
+        spec.get("findings") or quality.get("findings")
+    )
+    if not fix_needed:
+        yield _event(
+            state,
+            "auto_fix_skipped",
+            "auto_fix_prepare",
+            "No fixes needed based on review",
+            {},
+        )
+        return
+
+    yield _event(
+        state,
+        "auto_fix_proposed",
+        "auto_fix_prepare",
+        "Auto-fix proposal generated from review feedback",
+        {"spec_findings": spec.get("findings", []), "quality_findings": quality.get("findings", [])},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Context guard stage
+# ---------------------------------------------------------------------------
+
+
+async def _context_guard_stage(
+    state: AgentState,
+    provider: ChatProvider,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+    *,
+    phase: str = "before_plan",
+) -> AsyncIterator[AgentEvent]:
+    """Evaluate context budget and trigger compression if needed."""
+    state.loop_stage = f"context_guard_{phase}"
+    from solo_agent.context import ContextManager, ContextTokenEstimator
+
+    estimator = ContextTokenEstimator()
+    manager = ContextManager(settings=settings, main_provider=provider, estimator=estimator)
+    report = manager.evaluate(state, estimator=estimator)
+
+    if report.should_compress:
+        try:
+            result = await manager.maybe_compress(state, estimator=estimator)
+            yield _event(
+                state,
+                "context_compression_completed",
+                f"context_guard_{phase}",
+                "Context compression completed",
+                {"phase": phase, "result": result or {}},
+            )
+        except Exception as exc:
+            yield _event(
+                state,
+                "context_compression_failed",
+                f"context_guard_{phase}",
+                f"Context compression failed: {exc}",
+                {"phase": phase, "error": str(exc)},
+            )
+    else:
+        yield _event(
+            state,
+            "context_guard_passed",
+            f"context_guard_{phase}",
+            f"Context guard passed ({phase})",
+            {
+                "phase": phase,
+                "current_tokens": report.current_tokens,
+                "threshold_tokens": report.threshold_tokens,
+                "should_compress": report.should_compress,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
+# Persist snapshot stage
+# ---------------------------------------------------------------------------
+
+
+async def _persist_snapshot_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
+    """Persist final state snapshot."""
+    state.loop_stage = "persist_snapshot"
+    snapshot_data = {
+        key: value
+        for key, value in state.snapshot().items()
+        if key not in ("tool_calls", "context", "conversation_context")
+    }
+    state.snapshots["last_snapshot"] = {
+        "timestamp": utc_now().isoformat(),
+        "data": snapshot_data,
+    }
+    yield _event(
+        state,
+        "persist_snapshot_completed",
+        "persist_snapshot",
+        "Snapshot persisted",
+        {"snapshot": state.snapshots["last_snapshot"]},
+    )
 

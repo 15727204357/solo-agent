@@ -10,6 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
+from solo_agent.agent.graph import run_agent_events
 from solo_agent.memory import MemoryGovernanceError
 from solo_agent.settings import Settings, get_settings
 from solo_agent.tools import create_default_registry
@@ -451,6 +452,124 @@ async def stream_run_events(
                 if event.type in {"completed", "failed", "cancelled", "run_completed", "patch_approval_required"}:
                     break
             await asyncio.sleep(0)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint & Replay API
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/sessions/{session_id}/runs/{run_id}/checkpoints")
+async def list_run_checkpoints(
+    session_id: str,
+    run_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> list[dict[str, object]]:
+    checkpoints = await repo.list_checkpoints(session_id, run_id)
+    return [dict(c) for c in (checkpoints or [])]
+
+
+@router.get("/api/sessions/{session_id}/runs/{run_id}/graph")
+async def get_run_graph_state(
+    session_id: str,
+    run_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    checkpoint_id: str | None = Query(None),
+) -> dict[str, object]:
+    state = await repo.get_graph_snapshot(session_id, run_id, checkpoint_id=checkpoint_id)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph state not found")
+    return dict(state)
+
+
+class ResumeRunRequest(BaseModel):
+    approval: Literal["approved", "rejected"] | None = None
+    recovery_hints: dict[str, object] | None = None
+
+
+@router.post("/api/sessions/{session_id}/runs/{run_id}/resume")
+async def resume_run(
+    session_id: str,
+    run_id: str,
+    body: ResumeRunRequest,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    request: Request,
+) -> StreamingResponse:
+    run = await repo.get_run(session_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    if body.approval == "rejected":
+        await repo.mark_run_status(session_id, run_id, "cancelled")
+        return StreamingResponse(
+            iter([encode_sse({"type": "cancelled", "data": {"reason": "Rejected by user"}})]),
+            media_type="text/event-stream",
+        )
+
+    async def event_stream() -> AsyncIterator[str]:
+        prompt = run.prompt if hasattr(run, "prompt") else ""
+        async for event in run_agent_events(
+            session_id=session_id,
+            run_id=run_id,
+            user_input=prompt if isinstance(prompt, str) else "",
+        ):
+            if await request.is_disconnected():
+                break
+            yield encode_sse(event)
+            if event.type in {"completed", "failed", "cancelled", "run_completed"}:
+                break
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+class ReplayRunRequest(BaseModel):
+    checkpoint_id: str | None = None
+    from_node: str | None = None
+    dry_run: bool = True
+
+
+@router.post("/api/sessions/{session_id}/runs/{run_id}/replay")
+async def replay_run(
+    session_id: str,
+    run_id: str,
+    body: ReplayRunRequest,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    request: Request,
+) -> StreamingResponse:
+    run = await repo.get_run(session_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    async def event_stream() -> AsyncIterator[str]:
+        prompt = run.prompt if hasattr(run, "prompt") else ""
+        async for event in run_agent_events(
+            session_id=session_id,
+            run_id=f"{run_id}_replay",
+            user_input=prompt if isinstance(prompt, str) else "",
+        ):
+            if await request.is_disconnected():
+                break
+            yield encode_sse(event)
+            if event.type in {"completed", "failed", "cancelled", "run_completed"}:
+                break
 
     return StreamingResponse(
         event_stream(),

@@ -817,6 +817,178 @@ class SQLiteMemoryRepository:
             await session.commit()
             return record
 
+    async def save_route_decision(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        node: str,
+        route_name: str,
+        selected: str,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+        created_at: datetime | None = None,
+    ) -> SnapshotRecord:
+        return await self.append_snapshot(
+            session_id=session_id,
+            run_id=run_id,
+            label=f"route:{node}:{selected}",
+            snapshot_type=SnapshotType.ROUTE_DECISION,
+            data={
+                "node": node,
+                "route_name": route_name,
+                "selected": selected,
+                "reason": reason,
+                "evidence": evidence or {},
+            },
+            created_at=created_at,
+        )
+
+    async def save_graph_snapshot(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        label: str,
+        node_name: str | None = None,
+        state_snapshot: dict[str, Any] | None = None,
+        created_at: datetime | None = None,
+    ) -> SnapshotRecord:
+        return await self.append_snapshot(
+            session_id=session_id,
+            run_id=run_id,
+            label=label,
+            snapshot_type=SnapshotType.GRAPH_SNAPSHOT,
+            data={
+                "node_name": node_name,
+                "state_snapshot": state_snapshot or {},
+            },
+            created_at=created_at,
+        )
+
+    async def save_checkpoint_ref(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        checkpoint_id: str,
+        node_name: str,
+        step_number: int,
+        created_at: datetime | None = None,
+    ) -> SnapshotRecord:
+        return await self.append_snapshot(
+            session_id=session_id,
+            run_id=run_id,
+            label=f"checkpoint:{node_name}:{step_number}",
+            snapshot_type=SnapshotType.CHECKPOINT_REF,
+            data={
+                "checkpoint_id": checkpoint_id,
+                "node_name": node_name,
+                "step_number": step_number,
+            },
+            created_at=created_at,
+        )
+
+    async def list_checkpoint_refs(
+        self,
+        *,
+        run_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Sequence[SnapshotRecord]:
+        statement = (
+            select(SnapshotRecord)
+            .where(
+                SnapshotRecord.run_id == run_id,
+                SnapshotRecord.snapshot_type == SnapshotType.CHECKPOINT_REF.value,
+            )
+            .order_by(SnapshotRecord.created_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self._session_factory() as session:
+            result = await session.scalars(statement)
+            return result.all()
+
+    async def save_subagent_run(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        task_id: str,
+        subagent_type: str,
+        status: str,
+        prompt: str | None = None,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+        created_at: datetime | None = None,
+    ) -> SnapshotRecord:
+        return await self.append_snapshot(
+            session_id=session_id,
+            run_id=run_id,
+            label=f"subagent:{task_id}:{status}",
+            snapshot_type=SnapshotType.SUBAGENT_RUN,
+            data={
+                "task_id": task_id,
+                "subagent_type": subagent_type,
+                "status": status,
+                "prompt": prompt,
+                "result": result or {},
+                "error": error,
+            },
+            created_at=created_at,
+        )
+
+    async def save_review_report(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        review_type: str,
+        status: str,
+        report: dict[str, Any],
+        created_at: datetime | None = None,
+    ) -> SnapshotRecord:
+        return await self.append_snapshot(
+            session_id=session_id,
+            run_id=run_id,
+            label=f"review:{review_type}:{status}",
+            snapshot_type=SnapshotType.REVIEW_REPORT,
+            data={
+                "review_type": review_type,
+                "status": status,
+                "report": report,
+            },
+            created_at=created_at,
+        )
+
+    async def list_graph_timeline(
+        self,
+        *,
+        run_id: str,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> Sequence[SnapshotRecord]:
+        statement = (
+            select(SnapshotRecord)
+            .where(
+                SnapshotRecord.run_id == run_id,
+                SnapshotRecord.snapshot_type.in_([
+                    SnapshotType.ROUTE_DECISION.value,
+                    SnapshotType.GRAPH_SNAPSHOT.value,
+                    SnapshotType.CHECKPOINT_REF.value,
+                    SnapshotType.SUBAGENT_RUN.value,
+                    SnapshotType.REVIEW_REPORT.value,
+                ]),
+            )
+            .order_by(SnapshotRecord.created_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self._session_factory() as session:
+            result = await session.scalars(statement)
+            return result.all()
+
     async def complete_run(
         self,
         *,

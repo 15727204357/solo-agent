@@ -46,6 +46,11 @@ class SnapshotType(StrEnum):
     CHECKPOINT = "checkpoint"
     CONTEXT = "context"
     SUMMARY = "summary"
+    ROUTE_DECISION = "route_decision"
+    CHECKPOINT_REF = "checkpoint_ref"
+    REVIEW_REPORT = "review_report"
+    SUBAGENT_RUN = "subagent_run"
+    GRAPH_SNAPSHOT = "graph_snapshot"
 
 
 class MemoryTarget(StrEnum):
@@ -256,6 +261,9 @@ Index("ix_messages_session_sequence", MessageRecord.session_id, MessageRecord.se
 Index("ix_tool_calls_run_started", ToolCallRecord.run_id, ToolCallRecord.started_at)
 Index("ix_timing_points_run_created", TimingPointRecord.run_id, TimingPointRecord.created_at)
 Index("ix_snapshots_session_created", SnapshotRecord.session_id, SnapshotRecord.created_at)
+Index("ix_snapshots_run_type_created", SnapshotRecord.run_id, SnapshotRecord.snapshot_type, SnapshotRecord.created_at)
+Index("ix_snapshots_type_label", SnapshotRecord.snapshot_type, SnapshotRecord.label)
+Index("ix_snapshots_run_created", SnapshotRecord.run_id, SnapshotRecord.created_at)
 Index("ix_patch_proposals_run_created", PatchProposalRecord.run_id, PatchProposalRecord.created_at)
 Index("ix_memory_candidates_status_created", MemoryCandidateRecord.status, MemoryCandidateRecord.created_at)
 Index("ix_memory_entries_target_status", MemoryEntryRecord.target, MemoryEntryRecord.status)

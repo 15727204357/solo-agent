@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
 async def create_checkpointer(settings: Any) -> Any:
-    mode = getattr(settings, "workflow_checkpointer", "memory")
+    mode = getattr(settings, "workflow_checkpointer", "sqlite")
     if mode == "none":
         return False
 
@@ -22,7 +23,9 @@ async def create_checkpointer(settings: Any) -> Any:
             ) from exc
         import aiosqlite
 
-        path = getattr(settings, "workflow_checkpoint_path", ".solo-agent/checkpoints/solo_agent_graph.sqlite3")
+        path_str = getattr(settings, "workflow_checkpoint_path", ".solo-agent/checkpoints/solo_agent_graph.sqlite3")
+        path = Path(str(path_str))
+        path.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(str(path))
         return AsyncSqliteSaver(conn)
 

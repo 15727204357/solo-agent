@@ -67,27 +67,23 @@ class Settings(BaseSettings):
     sandbox_mode: str = "local"
     workflow_runtime_root: str = ".solo-agent/runs"
 
-    # LangGraph workflow engine settings.
-    workflow_engine: str = "legacy"
-    workflow_checkpointer: str = "memory"
+    # Workflow engine settings — LangGraph StateGraph is the only engine.
+    workflow_checkpointer: str = "sqlite"
     workflow_checkpoint_path: str = ".solo-agent/checkpoints/solo_agent_graph.sqlite3"
 
-    @field_validator("workflow_engine")
-    @classmethod
-    def validate_workflow_engine(cls, value: str) -> str:
-        if value not in ("legacy", "langgraph"):
-            import warnings
-            warnings.warn(f"Invalid workflow_engine '{value}', falling back to 'legacy'", stacklevel=2)
-            return "legacy"
-        return value
+    # Declarative multi-provider routing (optional — falls back to single provider).
+    provider_fast: str | None = None
+    provider_complete: str | None = None
+    provider_compression: str | None = None
+    provider_fallback: str | None = None
 
     @field_validator("workflow_checkpointer")
     @classmethod
     def validate_workflow_checkpointer(cls, value: str) -> str:
         if value not in ("memory", "sqlite", "none"):
             import warnings
-            warnings.warn(f"Invalid workflow_checkpointer '{value}', falling back to 'memory'", stacklevel=2)
-            return "memory"
+            warnings.warn(f"Invalid workflow_checkpointer '{value}', falling back to 'sqlite'", stacklevel=2)
+            return "sqlite"
         return value
 
     @field_validator("max_concurrent_subagents")

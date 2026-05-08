@@ -6,7 +6,6 @@ from solo_agent.workflow.graph_nodes import (
     make_persist_snapshot_node,
     make_skip_memory_node,
     make_task_state_node,
-    parallel_dispatch_placeholder_node,
 )
 from solo_agent.workflow.graph_state import initial_graph_state
 
@@ -36,12 +35,15 @@ async def test_persist_snapshot_node_saves_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_parallel_dispatch_placeholder_emits_event() -> None:
+async def test_subagent_dispatch_node_serial_fallback() -> None:
     state = AgentState(session_id="s3", run_id="r3", user_input="parallel test", execution_strategy="parallel")
     gs = initial_graph_state(state)
-    result = await parallel_dispatch_placeholder_node(gs)
-    events = result.get("events", [])
-    assert any(e["type"] == "parallel_dispatch_placeholder" for e in events)
+    from solo_agent.workflow.graph_nodes import make_subagent_dispatch_node
+    settings = type("Settings", (), {"max_concurrent_subagents": 3})()
+    deps = type("Deps", (), {})()
+    node = make_subagent_dispatch_node(deps, settings)
+    result = await node(gs)
+    # Without task candidates, should fall back to serial
     assert result["agent_state"]["execution_strategy"] == "serial"
 
 

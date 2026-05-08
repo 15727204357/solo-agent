@@ -1,1 +1,1 @@
-# DeerFlow-style workflow runtime for solo-agent
+# LangGraph StateGraph workflow runtime for solo-agent

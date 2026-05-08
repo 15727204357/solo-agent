@@ -13,7 +13,6 @@ from solo_agent.workflow.graphs import (
 
 
 class FakeSettings:
-    workflow_engine = "langgraph"
     workflow_checkpointer = "memory"
     workflow_checkpoint_path = ".solo-agent/checkpoints/test.sqlite3"
     memory_enabled = True
@@ -98,7 +97,7 @@ async def test_route_after_parallelism_gate_blocked_returns_end() -> None:
 @pytest.mark.asyncio
 async def test_route_after_parallelism_gate_parallel() -> None:
     state: SoloGraphState = {"agent_state": {"execution_strategy": "parallel", "blocked": False}, "events": [], "error": None}
-    assert route_after_parallelism_gate(state) == "parallel_dispatch_placeholder"
+    assert route_after_parallelism_gate(state) == "parallel_dispatch"
 
 
 @pytest.mark.asyncio
@@ -116,7 +115,7 @@ async def test_route_after_execute_tools_awaiting_approval() -> None:
 @pytest.mark.asyncio
 async def test_route_after_execute_tools_continue() -> None:
     state: SoloGraphState = {"agent_state": {"awaiting_approval": False}, "events": [], "error": None}
-    assert route_after_execute_tools(state) == "propose_verified_patch"
+    assert route_after_execute_tools(state) == "spec_compliance_review"
 
 
 @pytest.mark.asyncio

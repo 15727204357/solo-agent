@@ -127,6 +127,14 @@ class SessionRepository(ABC):
     async def mark_run_status(self, session_id: str, run_id: str, status: str) -> None:
         raise NotImplementedError
 
+    async def list_checkpoints(self, session_id: str, run_id: str) -> list[dict[str, object]]:
+        raise NotImplementedError
+
+    async def get_graph_snapshot(
+        self, session_id: str, run_id: str, *, checkpoint_id: str | None = None
+    ) -> dict[str, object] | None:
+        raise NotImplementedError
+
     @abstractmethod
     async def append_event(
         self,
@@ -697,6 +705,35 @@ class SQLiteSessionRepository(SessionRepository):
     async def revoke_memory_entry(self, entry_id: str, *, reason: str | None = None) -> dict[str, object] | None:
         repo = await self._repo()
         return await repo.revoke_memory_entry(entry_id, reason=reason)
+
+    async def list_checkpoints(self, session_id: str, run_id: str) -> list[dict[str, object]]:
+        repo = await self._repo()
+        records = await repo.list_checkpoint_refs(run_id=run_id)
+        return [
+            {
+                "checkpoint_id": r.data.get("checkpoint_id", ""),
+                "node_name": r.data.get("node_name", ""),
+                "step_number": r.data.get("step_number", 0),
+                "created_at": r.created_at.isoformat(),
+                "snapshot_id": r.id,
+            }
+            for r in records
+        ]
+
+    async def get_graph_snapshot(
+        self, session_id: str, run_id: str, *, checkpoint_id: str | None = None
+    ) -> dict[str, object] | None:
+        repo = await self._repo()
+        if checkpoint_id:
+            records = await repo.list_checkpoint_refs(run_id=run_id, limit=1)
+            for r in records:
+                if r.data.get("checkpoint_id") == checkpoint_id:
+                    return {"checkpoint_id": checkpoint_id, "run_id": run_id, "data": r.data}
+            return None
+        records = await repo.list_graph_timeline(run_id=run_id, limit=1)
+        if not records:
+            return None
+        return {"snapshot_id": records[-1].id, "type": records[-1].snapshot_type, "data": records[-1].data}
 
     async def append_event(
         self,

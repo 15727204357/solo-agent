@@ -51,6 +51,19 @@ class AgentState:
     error_classification: str = ""
     compaction_attempts: int = 0
 
+    # Graph-level state (final workflow orchestration)
+    route_decisions: list[dict[str, Any]] = field(default_factory=list)
+    review_reports: dict[str, Any] = field(default_factory=dict)
+    subagent_dispatches: list[dict[str, Any]] = field(default_factory=list)
+    subagent_results: dict[str, Any] = field(default_factory=dict)
+    supervisor_report: dict[str, Any] | None = None
+    error_state: dict[str, Any] = field(default_factory=dict)
+    approval_state: str = "none"
+    provider_mode: str = "complete"
+    recovery_attempts: int = 0
+    current_node: str = ""
+    previous_node: str | None = None
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
@@ -97,4 +110,16 @@ class AgentState:
             "retry_count": self.retry_count,
             "error_classification": self.error_classification,
             "compaction_attempts": self.compaction_attempts,
+            # Graph-level state
+            "route_decisions": self.route_decisions,
+            "review_reports": self.review_reports,
+            "subagent_dispatches": self.subagent_dispatches,
+            "subagent_results": self.subagent_results,
+            "supervisor_report": self.supervisor_report,
+            "error_state": self.error_state,
+            "approval_state": self.approval_state,
+            "provider_mode": self.provider_mode,
+            "recovery_attempts": self.recovery_attempts,
+            "current_node": self.current_node,
+            "previous_node": self.previous_node,
         }

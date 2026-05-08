@@ -80,6 +80,17 @@ def agent_state_from_graph_data(data: dict[str, Any]) -> AgentState:
         retry_count=int(data.get("retry_count", 0)),
         error_classification=str(data.get("error_classification", "")),
         compaction_attempts=int(data.get("compaction_attempts", 0)),
+        route_decisions=list(data.get("route_decisions") or []),
+        review_reports=dict(data.get("review_reports") or {}),
+        subagent_dispatches=list(data.get("subagent_dispatches") or []),
+        subagent_results=dict(data.get("subagent_results") or {}),
+        supervisor_report=data.get("supervisor_report"),
+        error_state=dict(data.get("error_state") or {}),
+        approval_state=str(data.get("approval_state", "none")),
+        provider_mode=str(data.get("provider_mode", "complete")),
+        recovery_attempts=int(data.get("recovery_attempts", 0)),
+        current_node=str(data.get("current_node", "")),
+        previous_node=data.get("previous_node"),
     )
 
 
@@ -88,6 +99,17 @@ def initial_graph_state(state: AgentState) -> SoloGraphState:
         "agent_state": agent_state_to_graph_data(state),
         "events": [],
         "error": None,
+        "route_decisions": [],
+        "review_reports": {},
+        "subagent_dispatches": [],
+        "subagent_results": {},
+        "supervisor_report": None,
+        "error_state": {},
+        "approval_state": "none",
+        "provider_mode": "complete",
+        "recovery_attempts": 0,
+        "current_node": "",
+        "previous_node": None,
     }
 
 
