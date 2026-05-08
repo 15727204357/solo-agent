@@ -70,6 +70,12 @@ class AgentRunner:
                 patch_max_tokens=settings.patch_max_tokens,
                 run_mode=run_mode,
                 plan_deep_max_tokens=settings.plan_deep_max_tokens,
+                workflow_engine=settings.workflow_engine,
+                subagent_enabled=settings.subagent_enabled,
+                max_concurrent_subagents=settings.max_concurrent_subagents,
+                subagent_timeout_seconds=settings.subagent_timeout_seconds,
+                sandbox_mode=settings.sandbox_mode,
+                workflow_runtime_root=settings.workflow_runtime_root,
             )
             registry = create_default_registry(settings.workspace_root)
             provider = create_provider_from_settings(agent_settings)

@@ -26,6 +26,50 @@ class AgentEvent:
             "created_at": self.created_at,
         }
 
+    @staticmethod
+    def _make_event(
+        type_: str,
+        session_id: str,
+        run_id: str,
+        node: str,
+        message: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        return AgentEvent(
+            type=type_,
+            session_id=session_id,
+            run_id=run_id,
+            node=node,
+            message=message,
+            data=data or {},
+        )
+
+    # Workflow 新事件类型工厂方法
+    @classmethod
+    def task_started(cls, session_id: str, run_id: str, node: str,
+                     message: str = "", data: dict[str, Any] | None = None) -> AgentEvent:
+        return cls._make_event("task_started", session_id, run_id, node, message, data)
+
+    @classmethod
+    def task_running(cls, session_id: str, run_id: str, node: str,
+                     message: str = "", data: dict[str, Any] | None = None) -> AgentEvent:
+        return cls._make_event("task_running", session_id, run_id, node, message, data)
+
+    @classmethod
+    def task_completed(cls, session_id: str, run_id: str, node: str,
+                       message: str = "", data: dict[str, Any] | None = None) -> AgentEvent:
+        return cls._make_event("task_completed", session_id, run_id, node, message, data)
+
+    @classmethod
+    def task_failed(cls, session_id: str, run_id: str, node: str,
+                    message: str = "", data: dict[str, Any] | None = None) -> AgentEvent:
+        return cls._make_event("task_failed", session_id, run_id, node, message, data)
+
+    @classmethod
+    def subagent_limited(cls, session_id: str, run_id: str, node: str,
+                         message: str = "", data: dict[str, Any] | None = None) -> AgentEvent:
+        return cls._make_event("subagent_limited", session_id, run_id, node, message, data)
+
     def to_sse(self) -> str:
         import json
 

@@ -41,6 +41,12 @@ class AgentSettings:
     patch_max_tokens: int = 1400
     run_mode: str = "agent"
     plan_deep_max_tokens: int = 6000
+    workflow_engine: str = "legacy"
+    subagent_enabled: bool = True
+    max_concurrent_subagents: int = 3
+    subagent_timeout_seconds: int = 900
+    sandbox_mode: str = "local"
+    workflow_runtime_root: str | Path = ".solo-agent/runs"
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
 

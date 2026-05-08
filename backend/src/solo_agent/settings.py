@@ -60,6 +60,54 @@ class Settings(BaseSettings):
     patch_max_tokens: int = 1400
     plan_deep_max_tokens: int = 6000
 
+    # Workflow engine (DeerFlow-style)
+    workflow_engine: str = "legacy"
+    subagent_enabled: bool = True
+    max_concurrent_subagents: int = 3
+    subagent_timeout_seconds: int = 900
+    sandbox_mode: str = "local"
+    workflow_runtime_root: str = ".solo-agent/runs"
+
+    @field_validator("workflow_engine")
+    @classmethod
+    def validate_workflow_engine(cls, value: str) -> str:
+        if value not in ("legacy", "deerflow"):
+            import warnings
+            warnings.warn(f"Invalid workflow_engine '{value}', falling back to 'legacy'", stacklevel=2)
+            return "legacy"
+        return value
+
+    @field_validator("max_concurrent_subagents")
+    @classmethod
+    def validate_max_concurrent_subagents(cls, value: int) -> int:
+        if not 1 <= value <= 10:
+            import warnings
+            warnings.warn(f"max_concurrent_subagents {value} out of range, using default 3", stacklevel=2)
+            return 3
+        return value
+
+    @field_validator("subagent_timeout_seconds")
+    @classmethod
+    def validate_subagent_timeout(cls, value: int) -> int:
+        if not 60 <= value <= 3600:
+            import warnings
+            warnings.warn(f"subagent_timeout_seconds {value} out of range, using default 900", stacklevel=2)
+            return 900
+        return value
+
+    @field_validator("sandbox_mode")
+    @classmethod
+    def validate_sandbox_mode(cls, value: str) -> str:
+        if value not in ("local", "docker"):
+            import warnings
+            warnings.warn(f"Invalid sandbox_mode '{value}', falling back to 'local'", stacklevel=2)
+            return "local"
+        if value == "docker":
+            import warnings
+            warnings.warn("Docker sandbox not yet implemented, falling back to 'local'", stacklevel=2)
+            return "local"
+        return value
+
     @field_validator("workspace_root")
     @classmethod
     def resolve_workspace_root(cls, value: Path) -> Path:

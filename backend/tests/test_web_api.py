@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 
 import solo_agent.web.routes as routes_module
+import solo_agent.web.runner as runner_module
 from fastapi.testclient import TestClient
+from solo_agent.agent.events import AgentEvent
+from solo_agent.settings import Settings
 from solo_agent.verified_editing import PatchEdit, PatchProposal
 from solo_agent.web.app import create_app
 from solo_agent.web.routes import get_repository, get_runner
+from solo_agent.web.runner import AgentRunner
 from solo_agent.web.store import InMemorySessionRepository
 
 
@@ -260,3 +264,55 @@ def test_web_api_run_mode_invalid_rejected() -> None:
         )
 
     assert run.status_code == 422
+
+
+def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
+    repo = InMemorySessionRepository()
+    captured: dict[str, object] = {}
+    settings = Settings(
+        workspace_root=tmp_path,
+        workflow_engine="deerflow",
+        subagent_enabled=False,
+        max_concurrent_subagents=4,
+        subagent_timeout_seconds=120,
+        sandbox_mode="local",
+        workflow_runtime_root=".tmp/runs",
+        provider="ollama",
+        model="fake-model",
+    )
+
+    class FakeProvider:
+        name = "fake"
+        model = "fake"
+
+    async def fake_run_agent_events(session_id, run_id, user_input, deps=None, settings=None):
+        captured["settings"] = settings
+        captured["deps_settings"] = deps.settings
+        yield AgentEvent(
+            type="run_completed",
+            session_id=session_id,
+            run_id=run_id,
+            node="workflow",
+            data={},
+        )
+
+    monkeypatch.setattr(runner_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runner_module, "create_default_registry", lambda _root: object())
+    monkeypatch.setattr(runner_module, "create_provider_from_settings", lambda agent_settings: FakeProvider())
+    monkeypatch.setattr(runner_module, "run_agent_events", fake_run_agent_events)
+
+    async def run() -> None:
+        session = await repo.create_session("Runner", None)
+        created = await repo.create_run(session.id, "hello", metadata={"run_mode": "agent"})
+        await AgentRunner(repo).run(session.id, created.id)
+
+    asyncio.run(run())
+
+    agent_settings = captured["settings"]
+    assert captured["deps_settings"] is agent_settings
+    assert agent_settings.workflow_engine == "deerflow"
+    assert agent_settings.subagent_enabled is False
+    assert agent_settings.max_concurrent_subagents == 4
+    assert agent_settings.subagent_timeout_seconds == 120
+    assert agent_settings.sandbox_mode == "local"
+    assert agent_settings.workflow_runtime_root == ".tmp/runs"

@@ -1,17 +1,14 @@
-# -*- coding: utf-8 -*-
 """ConversationRepair / fix_conversation 管道单元测试。"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
-
 from solo_agent.agent.fix_conversation import (
     ConversationRepair,
     fix_conversation,
 )
-
 
 # ---------------------------------------------------------------------------
 # 夹具
@@ -23,16 +20,16 @@ def repair() -> ConversationRepair:
     return ConversationRepair()
 
 
-def _msg(role: str, content: str, **extra: Any) -> Dict[str, Any]:
+def _msg(role: str, content: str, **extra: Any) -> dict[str, Any]:
     """快捷构造测试消息。"""
-    msg: Dict[str, Any] = {"role": role, "content": content}
+    msg: dict[str, Any] = {"role": role, "content": content}
     msg.update(extra)
     return msg
 
 
-def _tool(source: str, content: str, **extra: Any) -> Dict[str, Any]:
+def _tool(source: str, content: str, **extra: Any) -> dict[str, Any]:
     """快捷构造工具结果消息。"""
-    msg: Dict[str, Any] = {"source": source, "content": content}
+    msg: dict[str, Any] = {"source": source, "content": content}
     msg.update(extra)
     return msg
 

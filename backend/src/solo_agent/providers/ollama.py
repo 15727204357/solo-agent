@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from .base import ChatMessage, ProviderChunk, ProviderConfig, ProviderError
+from .base import ChatMessage, ProviderChunk, ProviderConfig, ProviderError, ProviderToolSpec, ToolChoice
 
 
 class OllamaProvider:
     name = "ollama"
+    supports_tool_calling = False
 
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config
@@ -21,7 +22,11 @@ class OllamaProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        tools: Sequence[ProviderToolSpec] | None = None,
+        tool_choice: ToolChoice = None,
     ) -> AsyncIterator[ProviderChunk]:
+        if tools or tool_choice is not None:
+            raise ProviderError("ollama provider does not support tool calling through this adapter")
         try:
             import httpx
         except ImportError as exc:

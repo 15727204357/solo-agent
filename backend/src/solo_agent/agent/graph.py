@@ -3,6 +3,7 @@
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -99,17 +100,54 @@ async def run_agent_events(
     deps: AgentDeps | None = None,
     settings: AgentSettings | Mapping[str, Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Run the Milestone 1 agent graph and stream visible progress events."""
+    """Run the agent graph and stream visible progress events.
+
+    根据 workflow_engine 配置分流:
+    - "deerflow": 委托给 WorkflowRuntime 新引擎
+    - "legacy" / plan 模式: 走现有 _run_graph 阶段管线
+    """
 
     deps = deps or AgentDeps()
-    settings = settings or deps.settings or AgentSettings()
+    settings = _coerce_agent_settings(settings or deps.settings or AgentSettings())
+    deps.settings = settings
     provider = deps.provider or create_provider_from_settings(settings)
     state = AgentState(session_id=session_id, run_id=run_id, user_input=user_input)
     _BEHAVIOR_POLICY.start_error_run(run_id)
 
+    workflow_engine = str(_setting(settings, "workflow_engine", "legacy"))
+    run_mode = str(_setting(settings, "run_mode", "agent"))
+
+    # plan 模式始终走旧路径
+    if workflow_engine != "deerflow" or run_mode == "plan":
+        try:
+            await _persist(deps.persistence, "start_run", state)
+            async for event in _run_graph(state, provider, deps, settings):
+                await _persist(deps.persistence, "save_event", event, state)
+                yield event
+        except Exception as exc:
+            event = _event(state, "error", "error", str(exc), {"error_type": type(exc).__name__})
+            await _persist(deps.persistence, "save_event", event, state)
+            await _persist(deps.persistence, "finish_run", state, status="error", error=str(exc))
+            yield event
+        else:
+            await _persist(
+                deps.persistence,
+                "finish_run",
+                state,
+                status="awaiting_approval" if state.awaiting_approval else "completed",
+            )
+        finally:
+            _BEHAVIOR_POLICY.finish_error_run(run_id)
+        return
+
+    # DeerFlow 工作流引擎路径
+    from solo_agent.workflow.runtime import WorkflowRuntime
+
+    runtime = WorkflowRuntime(deps=deps, state=state, provider=provider)
+
     try:
         await _persist(deps.persistence, "start_run", state)
-        async for event in _run_graph(state, provider, deps, settings):
+        async for event in runtime.run():
             await _persist(deps.persistence, "save_event", event, state)
             yield event
     except Exception as exc:
@@ -2248,6 +2286,17 @@ def _setting(settings: AgentSettings | Mapping[str, Any], key: str, default: Any
     if isinstance(settings, Mapping):
         return settings.get(key, default)
     return getattr(settings, key, default)
+
+
+def _coerce_agent_settings(settings: AgentSettings | Mapping[str, Any] | Any) -> AgentSettings:
+    if isinstance(settings, AgentSettings):
+        return settings
+    defaults = AgentSettings()
+    values: dict[str, Any] = {}
+    for item in dataclass_fields(AgentSettings):
+        default = getattr(defaults, item.name)
+        values[item.name] = _setting(settings, item.name, default)
+    return AgentSettings(**values)
 
 
 def _call_flexible(func: Any, payload: dict[str, Any]) -> Any:
