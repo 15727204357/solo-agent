@@ -1,0 +1,122 @@
+- generic [ref=e2]:
+  - complementary "项目与会话" [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]: SA
+      - generic [ref=e6]:
+        - heading "Solo Agent" [level=1] [ref=e7]
+        - paragraph [ref=e8]: development 本地运行时
+    - button "新建会话" [ref=e9] [cursor=pointer]
+    - generic [ref=e12]: solo-agent-web 已就绪
+    - region "当前项目" [ref=e13]:
+      - heading "当前项目" [level=2] [ref=e15]
+      - generic [ref=e16]:
+        - generic [ref=e17]: 本地路径
+        - textbox "本地路径" [ref=e18]:
+          - /placeholder: C:\CodeProject\learning\solo-agent
+      - generic [ref=e19]:
+        - button "选择目录" [ref=e20] [cursor=pointer]
+        - generic [ref=e21]: 浏览器支持时可辅助预览。
+    - region "最近工作区" [ref=e22]:
+      - generic [ref=e23]:
+        - heading "最近工作区" [level=2] [ref=e24]
+        - generic [ref=e25]: "0"
+  - main [ref=e26]:
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - paragraph [ref=e29]: 编码会话
+        - heading "新的编码会话" [level=2] [ref=e30]
+        - paragraph [ref=e31]: 选择历史会话，或输入任务开始一次新的 Agent 运行。
+      - generic [ref=e32]:
+        - generic [ref=e33]: 空闲
+        - generic [ref=e34]: 尚未运行
+    - region "多轮会话线程" [ref=e35]:
+      - article [ref=e36]:
+        - heading "开始一次真实的项目问询" [level=3] [ref=e37]
+        - paragraph [ref=e38]: 输入项目路径、会话标题和任务描述。运行后，助手回复会在这里流式输出，右侧只显示必要链路状态。
+    - region "对话" [ref=e39]:
+      - generic [ref=e40]:
+        - generic [ref=e41]:
+          - heading "对话" [level=2] [ref=e42]
+          - status [ref=e43]: 选择历史会话后可继续追问；新会话可先取一个标题。
+        - generic [ref=e44]: 新会话
+      - generic [ref=e45]:
+        - generic [ref=e46]:
+          - generic [ref=e47]: 会话标题
+          - textbox "会话标题" [ref=e48]:
+            - /placeholder: 例如：梳理 Agent 项目结构
+        - generic [ref=e49]:
+          - generic [ref=e50]: 消息
+          - textbox "消息" [ref=e51]:
+            - /placeholder: 输入你的问题，按发送后 Agent 会在当前会话中回复...
+        - generic [ref=e52]:
+          - button "发送消息" [ref=e53] [cursor=pointer]
+          - button "清空当前视图" [ref=e54] [cursor=pointer]
+  - complementary "Agent 后台监控" [ref=e55]:
+    - generic [ref=e56]:
+      - paragraph [ref=e57]: 后台监控
+      - heading "Agent 链路" [level=2] [ref=e58]
+      - paragraph [ref=e59]: 默认只展示阶段级信号，模型 chunk 保留在调试详情里。
+    - region "执行阶段" [ref=e60]:
+      - generic [ref=e61]:
+        - heading "执行阶段" [level=3] [ref=e62]
+        - generic [ref=e63]: 等待
+      - list [ref=e64]:
+        - listitem [ref=e65]:
+          - generic [ref=e66]: 接收任务
+          - emphasis [ref=e67]: 等待
+        - listitem [ref=e68]:
+          - generic [ref=e69]: 规划
+          - emphasis [ref=e70]: 等待
+        - listitem [ref=e71]:
+          - generic [ref=e72]: 上下文
+          - emphasis [ref=e73]: 等待
+        - listitem [ref=e74]:
+          - generic [ref=e75]: 安全检查
+          - emphasis [ref=e76]: 等待
+        - listitem [ref=e77]:
+          - generic [ref=e78]: 工具调用
+          - emphasis [ref=e79]: 等待
+        - listitem [ref=e80]:
+          - generic [ref=e81]: 生成回复
+          - emphasis [ref=e82]: 等待
+        - listitem [ref=e83]:
+          - generic [ref=e84]: 完成
+          - emphasis [ref=e85]: 等待
+    - region "运行概览" [ref=e86]:
+      - heading "运行概览" [level=3] [ref=e88]
+      - generic [ref=e89]:
+        - generic [ref=e90]:
+          - term [ref=e91]: 阶段事件
+          - definition [ref=e92]: "0"
+        - generic [ref=e93]:
+          - term [ref=e94]: 工具调用
+          - definition [ref=e95]: "0"
+        - generic [ref=e96]:
+          - term [ref=e97]: 计划字符
+          - definition [ref=e98]: "0"
+        - generic [ref=e99]:
+          - term [ref=e100]: 回复字符
+          - definition [ref=e101]: "0"
+    - region "Memory Inbox" [ref=e102]:
+      - generic [ref=e103]:
+        - heading "Memory Inbox" [level=3] [ref=e104]
+        - generic [ref=e105]: 0 pending
+      - generic [ref=e106]:
+        - button "Refresh" [ref=e107] [cursor=pointer]
+        - generic [ref=e108]: No pending memory candidates.
+      - paragraph [ref=e110]: Inbox is clear.
+      - group [ref=e111]:
+        - generic "Published memory" [ref=e112] [cursor=pointer]
+    - region "计划摘要" [ref=e113]:
+      - heading "计划摘要" [level=3] [ref=e115]
+      - generic [ref=e116]: 等待规划完成。
+    - region "工具调用" [ref=e117]:
+      - heading "工具调用" [level=3] [ref=e119]
+      - list
+    - region "阶段时间线" [ref=e120]:
+      - generic [ref=e121]:
+        - heading "阶段时间线" [level=3] [ref=e122]
+        - generic [ref=e123]: 0 条
+      - list
+    - group [ref=e124]:
+      - generic "调试详情" [ref=e125] [cursor=pointer]
