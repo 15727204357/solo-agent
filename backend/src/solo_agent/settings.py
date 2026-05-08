@@ -60,22 +60,12 @@ class Settings(BaseSettings):
     patch_max_tokens: int = 1400
     plan_deep_max_tokens: int = 6000
 
-    # Workflow engine (DeerFlow-style)
-    workflow_engine: str = "legacy"
+    # DeerFlow-style workflow runtime settings.
     subagent_enabled: bool = True
     max_concurrent_subagents: int = 3
     subagent_timeout_seconds: int = 900
     sandbox_mode: str = "local"
     workflow_runtime_root: str = ".solo-agent/runs"
-
-    @field_validator("workflow_engine")
-    @classmethod
-    def validate_workflow_engine(cls, value: str) -> str:
-        if value not in ("legacy", "deerflow"):
-            import warnings
-            warnings.warn(f"Invalid workflow_engine '{value}', falling back to 'legacy'", stacklevel=2)
-            return "legacy"
-        return value
 
     @field_validator("max_concurrent_subagents")
     @classmethod

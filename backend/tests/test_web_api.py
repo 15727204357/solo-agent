@@ -271,7 +271,6 @@ def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
     settings = Settings(
         workspace_root=tmp_path,
-        workflow_engine="deerflow",
         subagent_enabled=False,
         max_concurrent_subagents=4,
         subagent_timeout_seconds=120,
@@ -310,7 +309,6 @@ def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
 
     agent_settings = captured["settings"]
     assert captured["deps_settings"] is agent_settings
-    assert agent_settings.workflow_engine == "deerflow"
     assert agent_settings.subagent_enabled is False
     assert agent_settings.max_concurrent_subagents == 4
     assert agent_settings.subagent_timeout_seconds == 120

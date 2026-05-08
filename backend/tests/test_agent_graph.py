@@ -1118,7 +1118,10 @@ async def test_plan_mode_skips_tool_execution() -> None:
 
     event_types = [event.type for event in events]
     assert "tool_call_started" not in event_types
+    assert "tool_call_completed" not in event_types
+    assert "tool_call_failed" not in event_types
     assert "plan_completed" in event_types
+    assert registry.calls == []
     assert events[-1].type == "run_completed"
 
 

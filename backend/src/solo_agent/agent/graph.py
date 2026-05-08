@@ -100,50 +100,27 @@ async def run_agent_events(
     deps: AgentDeps | None = None,
     settings: AgentSettings | Mapping[str, Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Run the agent graph and stream visible progress events.
-
-    根据 workflow_engine 配置分流:
-    - "deerflow": 委托给 WorkflowRuntime 新引擎
-    - "legacy" / plan 模式: 走现有 _run_graph 阶段管线
-    """
+    """Run the primary workflow runtime and stream visible progress events."""
 
     deps = deps or AgentDeps()
     settings = _coerce_agent_settings(settings or deps.settings or AgentSettings())
     deps.settings = settings
     provider = deps.provider or create_provider_from_settings(settings)
     state = AgentState(session_id=session_id, run_id=run_id, user_input=user_input)
+    state.run_mode = str(_setting(settings, "run_mode", "agent"))
+    state.memory_enabled = bool(_setting(settings, "memory_enabled", True))
+    state.conversation_history_enabled = bool(
+        _setting(settings, "conversation_history_enabled", True)
+    )
     _BEHAVIOR_POLICY.start_error_run(run_id)
 
-    workflow_engine = str(_setting(settings, "workflow_engine", "legacy"))
-    run_mode = str(_setting(settings, "run_mode", "agent"))
-
-    # plan 模式始终走旧路径
-    if workflow_engine != "deerflow" or run_mode == "plan":
-        try:
-            await _persist(deps.persistence, "start_run", state)
-            async for event in _run_graph(state, provider, deps, settings):
-                await _persist(deps.persistence, "save_event", event, state)
-                yield event
-        except Exception as exc:
-            event = _event(state, "error", "error", str(exc), {"error_type": type(exc).__name__})
-            await _persist(deps.persistence, "save_event", event, state)
-            await _persist(deps.persistence, "finish_run", state, status="error", error=str(exc))
-            yield event
-        else:
-            await _persist(
-                deps.persistence,
-                "finish_run",
-                state,
-                status="awaiting_approval" if state.awaiting_approval else "completed",
-            )
-        finally:
-            _BEHAVIOR_POLICY.finish_error_run(run_id)
-        return
-
-    # DeerFlow 工作流引擎路径
     from solo_agent.workflow.runtime import WorkflowRuntime
 
-    runtime = WorkflowRuntime(deps=deps, state=state, provider=provider)
+    runtime = WorkflowRuntime(
+        deps=deps,
+        state=state,
+        provider=provider,
+    )
 
     try:
         await _persist(deps.persistence, "start_run", state)
@@ -685,11 +662,16 @@ async def _skill_context_stage(
         state.skill_budget,
     )
 
-    selected_result = await _call_tool_if_available(
-        deps.tool_registry,
-        "select_relevant_skills",
-        {"task": state.user_input, "plan": state.plan, "max_skills": max_skills},
-    )
+    selected_result = None
+    if state.run_mode == "plan":
+        # plan 模式不能执行工具；skill 工具选择留到真正执行阶段。
+        state.snapshots["skill_selection_skipped"] = {"reason": "plan_mode_no_tool_execution"}
+    else:
+        selected_result = await _call_tool_if_available(
+            deps.tool_registry,
+            "select_relevant_skills",
+            {"task": state.user_input, "plan": state.plan, "max_skills": max_skills},
+        )
     selected = _extract_tool_result(selected_result).get("skills", []) if selected_result else []
     state.selected_skills = [dict(skill) for skill in selected[:max_skills] if isinstance(skill, Mapping)]
     yield _event(
