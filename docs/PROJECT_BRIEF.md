@@ -56,7 +56,7 @@ Solo Agent 的团队工作流闭环是：
 
 - Web UI 优先，不做 CLI。
 - 支持真实 OpenAI、DeepSeek、Ollama 配置。
-- 实现 LangGraph 1.x 风格 Workflow Loop，并预留 TypedDict StateGraph 拓扑。
+- 实现 LangGraph 1.x 风格 Workflow Loop，并统一使用 TypedDict StateGraph 主编排。
 - 将工作流入口从单次个人任务升级为团队工程任务运行，预留任务类型注册、任务批次和并行调度边界。
 - 已知任务类型尽量代码化定义，LLM 不直接决定是否并行、是否越权写入或是否跳过审查。
 - 并行执行必须先通过独立性门控；不满足条件时默认串行。

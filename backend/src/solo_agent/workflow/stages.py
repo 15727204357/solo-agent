@@ -369,6 +369,38 @@ async def _load_builtin_memory_stage(
     )
 
 
+async def _load_conversation_context(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Load conversation history, summary, and memory context from persistence."""
+    context: dict[str, Any] = {
+        "summary": "",
+        "recent_messages": [],
+        "retrieved_memories": [],
+        "builtin_memory": {},
+        "budget": dict(state.memory_budget or {}),
+        "memory_enabled": state.memory_enabled,
+        "conversation_history_enabled": bool(_setting(settings, "conversation_history_enabled", True)),
+    }
+    if deps.persistence is None:
+        return context
+
+    prefetched = await _call_optional(
+        deps.persistence,
+        "prefetch_all",
+        session_id=state.session_id,
+        query=state.user_input or "",
+        recent_limit=int(_setting(settings, "history_message_limit", 12)),
+        limit=int(_setting(settings, "memory_search_limit", 5)),
+    )
+    if isinstance(prefetched, Mapping):
+        context.update(prefetched)
+
+    return context
+
+
 async def _prefetch_memory_stage(
     state: AgentState,
     deps: AgentDeps,
@@ -1066,130 +1098,18 @@ async def _sync_memory_stage(state: AgentState, deps: AgentDeps) -> AsyncIterato
     if deps.persistence is None or not state.memory_enabled:
         return
 
-    stats = await _call_optional(deps.persistence, "get_context_stats", state.session_id)
-    if isinstance(stats, Mapping):
-        context_stats = dict(stats.get("context_stats") or stats)
-        if "compression_count" in context_stats:
-            state.snapshots["compression_count"] = int(context_stats.get("compression_count") or 0)
-
-    estimator = ContextTokenEstimator()
-    manager = ContextManager(settings=settings, main_provider=provider, estimator=estimator)
-    report = manager.evaluate(state, estimator=estimator)
+    result = await _call_optional(
+        deps.persistence, "sync_all",
+        session_id=state.session_id, run_id=state.run_id,
+        user_input=state.user_input, assistant_response=state.response,
+    )
     yield _event(
         state,
-        "context_budget_checked",
-        "context",
-        "Checked context token budget",
-        {
-            "phase": phase,
-            "current_tokens": report.current_tokens,
-            "threshold_tokens": report.threshold_tokens,
-            "threshold_ratio": report.threshold_ratio,
-            "compression_count": report.compression_count,
-            "provider_role": report.provider_role,
-            "should_compress": report.should_compress,
-        },
+        "memory_synced",
+        "sync_memory",
+        "Memory synced to persistence",
+        {"result": result or {}},
     )
-    force_compress = False
-    if not report.should_compress and phase == "after_run":
-        force_compress = await _summary_trigger_met(state, deps, settings)
-    if not report.should_compress and not force_compress:
-        yield _event(
-            state,
-            "context_compression_skipped",
-            "context",
-            "Context compression skipped; budget is healthy",
-            {"phase": phase, "reason": report.reason},
-        )
-        return
-
-    yield _event(
-        state,
-        "context_compression_started",
-        "context",
-        "Compressing context before continuing",
-        {
-            "phase": phase,
-            "strategy": report.provider_role,
-            "compression_count": report.compression_count,
-            "forced": force_compress,
-        },
-    )
-    try:
-        await _call_optional(
-            deps.persistence,
-            "on_pre_compress",
-            session_id=state.session_id,
-            payload=_context_compression_payload(state),
-        )
-        result = await manager.maybe_compress(state, estimator=estimator, force=force_compress)
-    except Exception as exc:
-        state.compaction_attempts += 1
-        classification = _BEHAVIOR_POLICY.classify_error(
-            exc,
-            stage="context_guard",
-            attempt_count=state.compaction_attempts,
-            run_id=state.run_id,
-        )
-        state.last_error = classification.to_dict()
-        state.error_classification = classification.category
-
-        # max_compaction_attempts=2，第三次触发 architectural
-        if classification.category == "architectural":
-            state.summary_status = "failed"
-            yield _event(
-                state,
-                "error",
-                "context",
-                f"上下文压缩连续失败 {state.compaction_attempts} 次，判定为架构问题",
-                {
-                    "phase": phase,
-                    "compaction_attempts": state.compaction_attempts,
-                    "error_code": classification.error_code,
-                    "category": "architectural",
-                },
-            )
-            state.blocked = True
-            state.block_reason = f"上下文压缩架构问题 (compaction_attempts={state.compaction_attempts})"
-            return
-
-        try:
-            result = await _run_main_compression_recovery(state, provider, settings, estimator, exc)
-        except Exception as recovery_error:
-            state.summary_status = "failed"
-            yield _event(
-                state,
-                "memory_summary_failed",
-                "context",
-                "Context compression failed; continuing without blocking this run",
-                {"phase": phase, "error": str(recovery_error)},
-            )
-            return
-
-    await _persist_context_summary(state, deps, result, phase=phase)
-    _inject_task_state_block(state)
-    state.summary_status = "updated" if result.compressed else state.summary_status
-    yield _event(
-        state,
-        "context_compression_completed",
-        "context",
-        "Context compression completed",
-        {
-            "phase": phase,
-            "compression_count": result.compression_count,
-            "strategy": result.provider_role,
-            "model": result.provider_model,
-            "summary_chars": len(result.summary),
-        },
-    )
-    if state.snapshots.get("task_state_block"):
-        yield _event(
-            state,
-            "task_state_injected",
-            "context",
-            "Injected TaskList state after compression",
-            {"phase": phase, "length": len(str(state.snapshots.get("task_state_block", "")))},
-        )
 
 
 async def _queue_prefetch_stage(
@@ -1202,15 +1122,11 @@ async def _queue_prefetch_stage(
     if deps.persistence is None or not state.memory_enabled:
         return
     result = await _call_optional(
-        deps.persistence,
-        "queue_prefetch_all",
-        session_id=state.session_id,
-        query=state.user_input or "",
+        deps.persistence, "queue_prefetch_all",
+        session_id=state.session_id, query=state.user_input or "",
     )
     yield _event(
-        state,
-        "memory_prefetch_queued",
-        "queue_prefetch",
+        state, "memory_prefetch_queued", "queue_prefetch",
         "Memory prefetch queued for next interaction",
         {"result": result or {}},
     )
@@ -1227,17 +1143,13 @@ async def _compress_memory_stage(
     if deps.persistence is None or not state.memory_enabled:
         return
     await _call_optional(
-        deps.persistence,
-        "on_pre_compress",
+        deps.persistence, "on_pre_compress",
         session_id=state.session_id,
         payload={"summary": state.response, "session_id": state.session_id, "run_id": state.run_id},
     )
     yield _event(
-        state,
-        "memory_compress_completed",
-        "compress_memory",
-        "Memory compression completed",
-        {},
+        state, "memory_compress_completed", "compress_memory",
+        "Memory compression completed", {},
     )
 
 
@@ -2502,14 +2414,12 @@ async def _context_guard_stage(
 async def _persist_snapshot_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
     """Persist final state snapshot."""
     state.loop_stage = "persist_snapshot"
-    snapshot_data = {
-        key: value
-        for key, value in state.snapshot().items()
-        if key not in ("tool_calls", "context", "conversation_context")
-    }
+    raw = state.snapshot()
     state.snapshots["last_snapshot"] = {
-        "timestamp": utc_now().isoformat(),
-        "data": snapshot_data,
+        "timestamp": "now",
+        "plan_length": len(raw.get("plan", "")),
+        "response_length": len(raw.get("response", "")),
+        "tool_call_count": len(raw.get("tool_calls", [])),
     }
     yield _event(
         state,
