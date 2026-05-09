@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from solo_agent.agent.state import AgentState, ToolCallRecord
+from solo_agent.agent.state import AgentState, CoordinatorState, ResearcherState, SupervisorState, ToolCallRecord
 
 SoloGraphState = dict[str, Any]
 
@@ -34,6 +34,11 @@ def agent_state_to_graph_data(state: AgentState) -> dict[str, Any]:
 
 
 def agent_state_from_graph_data(data: dict[str, Any]) -> AgentState:
+    common = _parse_common_fields(data)
+    return AgentState(**common)
+
+
+def _parse_common_fields(data: dict[str, Any]) -> dict[str, Any]:
     tool_calls_raw: list[dict[str, Any]] = data.get("tool_calls") or []
     tool_calls = [
         ToolCallRecord(
@@ -45,58 +50,89 @@ def agent_state_from_graph_data(data: dict[str, Any]) -> AgentState:
         )
         for c in tool_calls_raw
     ]
-    return AgentState(
-        session_id=str(data.get("session_id", "")),
-        run_id=str(data.get("run_id", "")),
-        user_input=str(data.get("user_input", "")),
-        loop_stage=str(data.get("loop_stage", "initialized")),
-        run_mode=str(data.get("run_mode", "agent")),
-        memory_enabled=bool(data.get("memory_enabled", True)),
-        conversation_history_enabled=bool(data.get("conversation_history_enabled", True)),
-        memory_budget=dict(data.get("memory_budget") or {}),
-        summary_status=str(data.get("summary_status", "not_started")),
-        plan=str(data.get("plan", "")),
-        deep_plan=str(data.get("deep_plan", "")),
-        plan_quality_report=dict(data.get("plan_quality_report") or {}),
-        conversation_context=dict(data.get("conversation_context") or {}),
-        memory_context_block=str(data.get("memory_context_block", "")),
-        memory_warnings=list(data.get("memory_warnings") or []),
-        skill_context_block=str(data.get("skill_context_block", "")),
-        selected_skills=list(data.get("selected_skills") or []),
-        skill_budget=dict(data.get("skill_budget") or {}),
-        behavior_policy=dict(data.get("behavior_policy") or {}),
-        task_candidates=list(data.get("task_candidates") or []),
-        parallelism_decision=dict(data.get("parallelism_decision") or {}),
-        execution_strategy=str(data.get("execution_strategy", "serial")),
-        context=list(data.get("context") or []),
-        tool_calls=tool_calls,
-        patch_proposal=data.get("patch_proposal"),
-        awaiting_approval=bool(data.get("awaiting_approval", False)),
-        response=str(data.get("response", "")),
-        blocked=bool(data.get("blocked", False)),
-        block_reason=data.get("block_reason"),
-        snapshots=dict(data.get("snapshots") or {}),
-        last_error=dict(data.get("last_error") or {}),
-        retry_count=int(data.get("retry_count", 0)),
-        error_classification=str(data.get("error_classification", "")),
-        compaction_attempts=int(data.get("compaction_attempts", 0)),
-        route_decisions=list(data.get("route_decisions") or []),
-        review_reports=dict(data.get("review_reports") or {}),
-        subagent_dispatches=list(data.get("subagent_dispatches") or []),
-        subagent_results=dict(data.get("subagent_results") or {}),
-        supervisor_report=data.get("supervisor_report"),
-        error_state=dict(data.get("error_state") or {}),
-        approval_state=str(data.get("approval_state", "none")),
-        provider_mode=str(data.get("provider_mode", "complete")),
-        recovery_attempts=int(data.get("recovery_attempts", 0)),
-        current_node=str(data.get("current_node", "")),
-        previous_node=data.get("previous_node"),
+    return {
+        "session_id": str(data.get("session_id", "")),
+        "run_id": str(data.get("run_id", "")),
+        "user_input": str(data.get("user_input", "")),
+        "loop_stage": str(data.get("loop_stage", "initialized")),
+        "run_mode": str(data.get("run_mode", "agent")),
+        "memory_enabled": bool(data.get("memory_enabled", True)),
+        "conversation_history_enabled": bool(data.get("conversation_history_enabled", True)),
+        "memory_budget": dict(data.get("memory_budget") or {}),
+        "summary_status": str(data.get("summary_status", "not_started")),
+        "plan": str(data.get("plan", "")),
+        "deep_plan": str(data.get("deep_plan", "")),
+        "plan_quality_report": dict(data.get("plan_quality_report") or {}),
+        "conversation_context": dict(data.get("conversation_context") or {}),
+        "memory_context_block": str(data.get("memory_context_block", "")),
+        "memory_warnings": list(data.get("memory_warnings") or []),
+        "skill_context_block": str(data.get("skill_context_block", "")),
+        "selected_skills": list(data.get("selected_skills") or []),
+        "skill_budget": dict(data.get("skill_budget") or {}),
+        "behavior_policy": dict(data.get("behavior_policy") or {}),
+        "task_candidates": list(data.get("task_candidates") or []),
+        "parallelism_decision": dict(data.get("parallelism_decision") or {}),
+        "execution_strategy": str(data.get("execution_strategy", "serial")),
+        "context": list(data.get("context") or []),
+        "tool_calls": tool_calls,
+        "patch_proposal": data.get("patch_proposal"),
+        "awaiting_approval": bool(data.get("awaiting_approval", False)),
+        "response": str(data.get("response", "")),
+        "blocked": bool(data.get("blocked", False)),
+        "block_reason": data.get("block_reason"),
+        "snapshots": dict(data.get("snapshots") or {}),
+        "last_error": dict(data.get("last_error") or {}),
+        "retry_count": int(data.get("retry_count", 0)),
+        "error_classification": str(data.get("error_classification", "")),
+        "compaction_attempts": int(data.get("compaction_attempts", 0)),
+        "route_decisions": list(data.get("route_decisions") or []),
+        "review_reports": dict(data.get("review_reports") or {}),
+        "subagent_dispatches": list(data.get("subagent_dispatches") or []),
+        "subagent_results": dict(data.get("subagent_results") or {}),
+        "supervisor_report": data.get("supervisor_report"),
+        "error_state": dict(data.get("error_state") or {}),
+        "approval_state": str(data.get("approval_state", "none")),
+        "provider_mode": str(data.get("provider_mode", "complete")),
+        "recovery_attempts": int(data.get("recovery_attempts", 0)),
+        "current_node": str(data.get("current_node", "")),
+        "previous_node": data.get("previous_node"),
+    }
+
+
+def coordinator_state_from_graph_data(data: dict[str, Any]) -> CoordinatorState:
+    common = _parse_common_fields(data)
+    return CoordinatorState(
+        **common,
+        research_plan=str(data.get("research_plan", "")),
+        supervisor_task_specs=list(data.get("supervisor_task_specs") or []),
+        aggregated_results=dict(data.get("aggregated_results") or {}),
     )
 
 
-def initial_graph_state(state: AgentState) -> SoloGraphState:
+def supervisor_state_from_graph_data(data: dict[str, Any]) -> SupervisorState:
+    common = _parse_common_fields(data)
+    return SupervisorState(
+        **common,
+        dispatched_tasks=list(data.get("dispatched_tasks") or []),
+        completed_results=dict(data.get("completed_results") or {}),
+        exploration_loop_count=int(data.get("exploration_loop_count", 0)),
+        supervisor_decision=str(data.get("supervisor_decision", "")),
+    )
+
+
+def researcher_state_from_graph_data(data: dict[str, Any]) -> ResearcherState:
+    common = _parse_common_fields(data)
+    return ResearcherState(
+        **common,
+        research_prompt=str(data.get("research_prompt", "")),
+        subagent_type=str(data.get("subagent_type", "")),
+        findings=dict(data.get("findings") or {}),
+    )
+
+
+def _base_graph_dict(agent_data: dict[str, Any]) -> SoloGraphState:
     return {
-        "agent_state": agent_state_to_graph_data(state),
+        "agent_state": agent_data,
         "events": [],
         "error": None,
         "route_decisions": [],
@@ -111,6 +147,34 @@ def initial_graph_state(state: AgentState) -> SoloGraphState:
         "current_node": "",
         "previous_node": None,
     }
+
+
+def initial_graph_state(state: AgentState) -> SoloGraphState:
+    return _base_graph_dict(agent_state_to_graph_data(state))
+
+
+def initial_coordinator_graph_state(state: CoordinatorState) -> SoloGraphState:
+    return _base_graph_dict(coordinator_state_to_graph_data(state))
+
+
+def initial_supervisor_graph_state(state: SupervisorState) -> SoloGraphState:
+    return _base_graph_dict(supervisor_state_to_graph_data(state))
+
+
+def initial_researcher_graph_state(state: ResearcherState) -> SoloGraphState:
+    return _base_graph_dict(researcher_state_to_graph_data(state))
+
+
+def coordinator_state_to_graph_data(state: CoordinatorState) -> dict[str, Any]:
+    return state.snapshot()
+
+
+def supervisor_state_to_graph_data(state: SupervisorState) -> dict[str, Any]:
+    return state.snapshot()
+
+
+def researcher_state_to_graph_data(state: ResearcherState) -> dict[str, Any]:
+    return state.snapshot()
 
 
 def update_from_agent_state(

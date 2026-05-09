@@ -13,6 +13,7 @@ class AgentEvent:
     node: str
     message: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+    agent_source: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -23,6 +24,7 @@ class AgentEvent:
             "node": self.node,
             "message": self.message,
             "data": self.data,
+            "agent_source": self.agent_source,
             "created_at": self.created_at,
         }
 
@@ -34,6 +36,7 @@ class AgentEvent:
         node: str,
         message: str = "",
         data: dict[str, Any] | None = None,
+        agent_source: str = "",
     ) -> AgentEvent:
         return AgentEvent(
             type=type_,
@@ -42,6 +45,7 @@ class AgentEvent:
             node=node,
             message=message,
             data=data or {},
+            agent_source=agent_source,
         )
 
     # Workflow 新事件类型工厂方法

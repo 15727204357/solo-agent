@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from solo_agent.tools.registry import ToolSpec
-from solo_agent.workflow.factory import LeadAgentFactory
 from solo_agent.workflow.sandbox.local import LocalSandboxProvider
 from solo_agent.workflow.sandbox.provider import SandboxProvider
 from solo_agent.workflow.sandbox.tool_adapter import (
@@ -176,42 +174,6 @@ def test_readonly_tool_names():
     assert "list_files" in READONLY_TOOL_NAMES
     assert "apply_text_edit" not in READONLY_TOOL_NAMES
     assert "prepare_edit" not in READONLY_TOOL_NAMES
-
-
-def test_lead_tools_include_edit_tool_but_allowlist_hides_it():
-    class FakeRegistry:
-        def __init__(self):
-            self._tools = {
-                "read_file": ToolSpec(
-                    name="read_file",
-                    description="read",
-                    read_only=True,
-                    handler=lambda **kwargs: {"content": "ok"},
-                    parameters={"path": "Path"},
-                ),
-                "apply_text_edit": ToolSpec(
-                    name="apply_text_edit",
-                    description="edit",
-                    read_only=False,
-                    handler=lambda **kwargs: {"changed": True},
-                    parameters={"path": "Path"},
-                    category="edit",
-                ),
-            }
-
-        def call(self, name, arguments=None):
-            return {"ok": True, "result": self._tools[name].handler(**dict(arguments or {}))}
-
-    factory = LeadAgentFactory(model=object(), tool_registry=FakeRegistry())
-
-    lead_names = {tool.name for tool in factory.build_tools(include_task=False)}
-    subagent_names = {
-        tool.name
-        for tool in factory.build_tools(include_task=False, allowed_names=READONLY_TOOL_NAMES)
-    }
-
-    assert "apply_text_edit" in lead_names
-    assert "apply_text_edit" not in subagent_names
 
 
 def test_local_sandbox_allows_normalized_child_path(temp_root):

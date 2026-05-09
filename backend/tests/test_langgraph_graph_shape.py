@@ -4,7 +4,9 @@ import pytest
 from langgraph.graph import END
 from solo_agent.workflow.graph_state import SoloGraphState
 from solo_agent.workflow.graphs import (
-    build_text_provider_graph,
+    _error_aware_route,
+    _has_error,
+    build_main_workflow_graph,
     make_route_after_guard,
     route_after_execute_tools,
     route_after_parallelism_gate,
@@ -61,14 +63,14 @@ class FakeDeps:
 
 @pytest.mark.asyncio
 async def test_graph_compiles_without_checkpointer() -> None:
-    graph = build_text_provider_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
+    graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
     compiled = graph.compile(checkpointer=False)
     assert compiled is not None
 
 
 @pytest.mark.asyncio
 async def test_graph_compiles_with_memory_checkpointer() -> None:
-    graph = build_text_provider_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
+    graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
     from langgraph.checkpoint.memory import InMemorySaver
     compiled = graph.compile(checkpointer=InMemorySaver())
     assert compiled is not None
@@ -128,3 +130,47 @@ async def test_route_after_patch_awaiting_approval() -> None:
 async def test_route_after_patch_continue() -> None:
     state: SoloGraphState = {"agent_state": {"awaiting_approval": False}, "events": [], "error": None}
     assert route_after_patch(state) == "subdirectory_hint"
+
+
+@pytest.mark.asyncio
+async def test_has_error_detects_error_state() -> None:
+    state: SoloGraphState = {"agent_state": {}, "events": [], "error": {"error_type": "ValueError", "error_message": "test"}}
+    assert _has_error(state) is True
+
+
+@pytest.mark.asyncio
+async def test_has_error_none_when_clean() -> None:
+    state: SoloGraphState = {"agent_state": {}, "events": [], "error": None}
+    assert _has_error(state) is False
+
+
+@pytest.mark.asyncio
+async def test_error_aware_route_diverts_on_error() -> None:
+    state: SoloGraphState = {"agent_state": {}, "events": [], "error": {"error_type": "TestError"}}
+    assert _error_aware_route(state, "next_node") == "classify_error"
+
+
+@pytest.mark.asyncio
+async def test_error_aware_route_passes_through_when_clean() -> None:
+    state: SoloGraphState = {"agent_state": {}, "events": [], "error": None}
+    assert _error_aware_route(state, "next_node") == "next_node"
+
+
+@pytest.mark.asyncio
+async def test_graph_contains_error_recovery_nodes() -> None:
+    graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
+    compiled = graph.compile(checkpointer=False)
+    assert compiled is not None
+    node_names = list(graph.nodes.keys())
+    assert "classify_error" in node_names
+    assert "recovery_action" in node_names
+    assert "repetition_guard" in node_names
+
+
+@pytest.mark.asyncio
+async def test_graph_contains_plan_response_node() -> None:
+    graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
+    compiled = graph.compile(checkpointer=False)
+    assert compiled is not None
+    node_names = list(graph.nodes.keys())
+    assert "plan_response" in node_names

@@ -9,24 +9,27 @@ from solo_agent.workflow.graph_state import (
     agent_state_to_graph_data,
 )
 from solo_agent.workflow.stages import (
+    _architecture_failure_response_stage,
     _build_memory_context_stage,
     _collect_context_node,
     _compress_memory_stage,
     _context_guard_stage,
     _deep_plan_revision_stage,
     _deep_plan_stage,
+    _environment_error_response_stage,
     _execute_tools_node,
     _inspect_node,
     _load_builtin_memory_stage,
     _parallelism_gate_stage,
     _persist_snapshot_stage,
-    _plan_mode_path,
     _plan_node,
+    _plan_response_stage,
     _plan_self_review_stage,
     _prefetch_memory_stage,
     _propose_verified_patch_node,
     _queue_prefetch_stage,
     _receive_user_turn_stage,
+    _recovery_action_stage,
     _respond_node,
     _select_tools_node,
     _skill_context_stage,
@@ -37,31 +40,6 @@ from solo_agent.workflow.stages import (
 )
 
 StageKwArgs = dict[str, Any]
-
-
-def _run_stage(
-    state: AgentState,
-    stage_fn: Any,
-    *args: Any,
-    **kwargs: Any,
-) -> tuple[AgentState, list[dict[str, Any]]]:
-    events: list[dict[str, Any]] = []
-    collected_error: dict[str, Any] | None = None
-    try:
-        import asyncio
-        agen = stage_fn(state, *args, **kwargs)
-        while True:
-            try:
-                event = asyncio.get_event_loop().run_until_complete(agen.__anext__())
-                events.append(event.to_dict())
-            except StopAsyncIteration:
-                break
-    except Exception as exc:
-        collected_error = {
-            "error_type": type(exc).__name__,
-            "error_message": str(exc),
-        }
-    return state, events, collected_error
 
 
 async def _run_stage_async(
@@ -98,81 +76,27 @@ def _make_node(stage_fn: Any, *extra_args: Any, **extra_kwargs: Any):
 
 
 def make_receive_user_turn_node(settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _receive_user_turn_stage, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_receive_user_turn_stage, settings)
 
 
 def make_skip_memory_node():
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _skip_memory_stage)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_skip_memory_stage)
 
 
 def make_load_builtin_memory_node(deps: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _load_builtin_memory_stage, deps)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_load_builtin_memory_stage, deps)
 
 
 def make_prefetch_memory_node(deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _prefetch_memory_stage, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_prefetch_memory_stage, deps, settings)
 
 
 def make_build_memory_context_node():
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _build_memory_context_stage)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_build_memory_context_stage)
 
 
 def make_skill_context_node(deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _skill_context_stage, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_skill_context_stage, deps, settings)
 
 
 def make_context_guard_node(provider: Any, deps: Any, settings: Any, *, phase: str):
@@ -186,189 +110,59 @@ def make_context_guard_node(provider: Any, deps: Any, settings: Any, *, phase: s
 
 
 def make_plan_node(provider: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _plan_node, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_plan_node, provider, settings)
 
 
 def make_task_state_node():
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _task_state_stage)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_task_state_stage)
 
 
 def make_parallelism_gate_node(settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _parallelism_gate_stage, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_parallelism_gate_stage, settings)
 
 
 def make_collect_context_node(deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _collect_context_node, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_collect_context_node, deps, settings)
 
 
 def make_inspect_node(deps: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _inspect_node, deps)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_inspect_node, deps)
 
 
 def make_select_tools_node(deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _select_tools_node, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_select_tools_node, deps, settings)
 
 
 def make_execute_tools_node(deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _execute_tools_node, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_execute_tools_node, deps, settings)
 
 
 def make_propose_verified_patch_node(provider: Any, deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(
-            agent_state, _propose_verified_patch_node, provider, deps, settings
-        )
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_propose_verified_patch_node, provider, deps, settings)
 
 
 def make_subdirectory_hint_node(settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _subdirectory_hint_stage, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_subdirectory_hint_stage, settings)
 
 
 def make_respond_node(provider: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _respond_node, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_respond_node, provider, settings)
 
 
 def make_sync_memory_node(deps: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _sync_memory_stage, deps)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_sync_memory_stage, deps)
 
 
 def make_queue_prefetch_node(deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _queue_prefetch_stage, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_queue_prefetch_stage, deps, settings)
 
 
 def make_compress_memory_node(provider: Any, deps: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(
-            agent_state, _compress_memory_stage, provider, deps, settings
-        )
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_compress_memory_stage, provider, deps, settings)
 
 
 def make_persist_snapshot_node():
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _persist_snapshot_stage)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_persist_snapshot_stage)
 
 
 # ---------------------------------------------------------------------------
@@ -376,16 +170,7 @@ def make_persist_snapshot_node():
 # ---------------------------------------------------------------------------
 
 def make_deep_plan_node(provider: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _deep_plan_stage, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_deep_plan_stage, provider, settings)
 
 
 def make_plan_quality_gate_node(settings: Any):
@@ -416,8 +201,25 @@ def make_plan_quality_gate_node(settings: Any):
 
 def make_deep_plan_revision_node(provider: Any, settings: Any):
     async def node(graph_state: SoloGraphState) -> SoloGraphState:
+        from solo_agent.agent.planning import PlanQualityIssue, PlanQualityReport
+
         agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _deep_plan_revision_stage, provider, settings)
+        quality_report = agent_state.plan_quality_report
+        if not isinstance(quality_report, PlanQualityReport):
+            issues = [PlanQualityIssue(
+                type=issue.get("type", "unknown"),
+                pattern=issue.get("pattern", ""),
+                message=issue.get("message", ""),
+                location=issue.get("location", ""),
+            ) for issue in (quality_report.get("issues") or [])]
+            quality_report = PlanQualityReport(
+                passed=False,
+                issues=issues,
+                summary=quality_report.get("summary", ""),
+            )
+        updated, events, error = await _run_stage_async(
+            agent_state, _deep_plan_revision_stage, provider, settings, quality_report
+        )
         graph_state["agent_state"] = agent_state_to_graph_data(updated)
         if events:
             graph_state["events"] = (graph_state.get("events") or []) + events
@@ -428,29 +230,11 @@ def make_deep_plan_revision_node(provider: Any, settings: Any):
 
 
 def make_plan_self_review_node(provider: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _plan_self_review_stage, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_plan_self_review_stage, provider, settings)
 
 
 def make_plan_response_node(provider: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _plan_mode_path, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_plan_response_stage)
 
 
 # ---------------------------------------------------------------------------
@@ -567,28 +351,12 @@ def make_spec_compliance_review_node(provider: Any, settings: Any):
 
 
 # ---------------------------------------------------------------------------
-# Verified patch route
-# ---------------------------------------------------------------------------
-
-def make_verified_patch_route_node():
-    """Determine patch route: no_patch, patch_required, or approved."""
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        patch = agent_state.patch_proposal
-        if patch is None:
-            pass
-        graph_state["agent_state"] = agent_state_to_graph_data(agent_state)
-        return graph_state
-    return node
-
-
-# ---------------------------------------------------------------------------
 # Error recovery nodes
 # ---------------------------------------------------------------------------
 
 def make_classify_error_node():
-    """Classify errors using ErrorClassifier and store in error_state."""
-    from solo_agent.agent.error_classifier import ErrorClassifier
+    """Classify errors using BehaviorPolicy and store in error_state."""
+    from solo_agent.workflow.stages import _BEHAVIOR_POLICY
 
     async def node(graph_state: SoloGraphState) -> SoloGraphState:
         agent_state = agent_state_from_graph_data(graph_state["agent_state"])
@@ -598,9 +366,11 @@ def make_classify_error_node():
 
         error_message = last_error.get("error_message", "")
         try:
-            classifier = ErrorClassifier()
-            classification = classifier.classify(
-                Exception(error_message) if error_message else Exception("Unknown error")
+            classification = _BEHAVIOR_POLICY.classify_error(
+                Exception(error_message) if error_message else Exception("Unknown error"),
+                stage="graph_node",
+                attempt_count=agent_state.retry_count,
+                run_id=agent_state.run_id,
             )
             category = classification.category
         except Exception:
@@ -667,94 +437,12 @@ def make_repetition_guard_node():
 
 
 def make_recovery_action_node(deps: Any, settings: Any):
-    """Execute recovery action based on error classification."""
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        error_state = agent_state.error_state or {}
-        classification = error_state.get("classification", "")
-
-        graph_state["events"] = (graph_state.get("events") or []) + [{
-            "type": "recovery_started",
-            "session_id": agent_state.session_id,
-            "run_id": agent_state.run_id,
-            "node": "recovery_action",
-            "message": f"Recovery action for: {classification}",
-            "data": {"classification": classification},
-        }]
-        graph_state["agent_state"] = agent_state_to_graph_data(agent_state)
-        return graph_state
-    return node
-
-
-# ---------------------------------------------------------------------------
-# Auto-fix, provider routing, verification
-# ---------------------------------------------------------------------------
-
-def make_auto_fix_prepare_node(provider: Any, settings: Any):
-    from solo_agent.workflow.stages import _auto_fix_prepare_stage
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _auto_fix_prepare_stage, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
-
-
-def make_provider_routing_node(settings: Any):
-    from solo_agent.workflow.stages import _provider_routing_stage
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _provider_routing_stage, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
-
-
-def make_run_verification_node(deps: Any, settings: Any):
-    from solo_agent.workflow.stages import _run_verification_stage
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _run_verification_stage, deps, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_recovery_action_stage, deps, settings)
 
 
 def make_environment_error_response_node(provider: Any, settings: Any):
-    from solo_agent.workflow.stages import _environment_error_response_stage
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _environment_error_response_stage, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_environment_error_response_stage, provider, settings)
 
 
 def make_architecture_failure_response_node(provider: Any, settings: Any):
-    from solo_agent.workflow.stages import _architecture_failure_response_stage
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        updated, events, error = await _run_stage_async(agent_state, _architecture_failure_response_stage, provider, settings)
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
+    return _make_node(_architecture_failure_response_stage, provider, settings)

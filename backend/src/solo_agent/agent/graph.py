@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import fields as dataclass_fields
 from typing import Any
 
 from solo_agent.providers import create_provider_from_settings
@@ -21,6 +20,8 @@ async def run_agent_events(
     """Run the primary workflow runtime and stream visible progress events."""
 
     deps = deps or AgentDeps()
+    from solo_agent.workflow.stages import _coerce_agent_settings, _setting
+
     settings = _coerce_agent_settings(settings or deps.settings or AgentSettings())
     deps.settings = settings
     provider = deps.provider or create_provider_from_settings(settings)
@@ -62,19 +63,3 @@ async def run_agent_events(
     finally:
         _BEHAVIOR_POLICY.finish_error_run(run_id)
 
-
-def _setting(settings: AgentSettings | Mapping[str, Any], key: str, default: Any) -> Any:
-    if isinstance(settings, Mapping):
-        return settings.get(key, default)
-    return getattr(settings, key, default)
-
-
-def _coerce_agent_settings(settings: AgentSettings | Mapping[str, Any] | Any) -> AgentSettings:
-    if isinstance(settings, AgentSettings):
-        return settings
-    defaults = AgentSettings()
-    values: dict[str, Any] = {}
-    for item in dataclass_fields(AgentSettings):
-        default = getattr(defaults, item.name)
-        values[item.name] = _setting(settings, item.name, default)
-    return AgentSettings(**values)

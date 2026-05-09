@@ -4,7 +4,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from solo_agent.agent.state import AgentState
 from solo_agent.workflow.graph_state import initial_graph_state
-from solo_agent.workflow.graphs import build_text_provider_graph
+from solo_agent.workflow.graphs import build_main_workflow_graph
 
 
 class ChatChunk:
@@ -96,7 +96,7 @@ async def test_graph_runtime_emits_parallelism_gate_completed() -> None:
     )
     gs = initial_graph_state(state)
     provider = FakeProvider(plan="1. Do step one\n2. Do step two\n3. Run tests")
-    graph = build_text_provider_graph(provider=provider, deps=FakeDeps(), settings=FakeSettings())
+    graph = build_main_workflow_graph(provider=provider, deps=FakeDeps(), settings=FakeSettings())
     compiled = graph.compile(checkpointer=InMemorySaver())
 
     config = {"configurable": {"thread_id": "r1"}}
@@ -116,7 +116,7 @@ async def test_serial_strategy_with_no_metadata() -> None:
     )
     gs = initial_graph_state(state)
     provider = FakeProvider(plan="1. Inspect the codebase.\n2. Fix the issue.\n3. Run pytest.")
-    graph = build_text_provider_graph(provider=provider, deps=FakeDeps(), settings=FakeSettings())
+    graph = build_main_workflow_graph(provider=provider, deps=FakeDeps(), settings=FakeSettings())
     compiled = graph.compile(checkpointer=InMemorySaver())
 
     final_state = None
@@ -138,7 +138,7 @@ async def test_agent_state_is_restored_after_stream() -> None:
     )
     gs = initial_graph_state(state)
     provider = FakeProvider(plan="Do something")
-    graph = build_text_provider_graph(provider=provider, deps=FakeDeps(), settings=FakeSettings())
+    graph = build_main_workflow_graph(provider=provider, deps=FakeDeps(), settings=FakeSettings())
     compiled = graph.compile(checkpointer=InMemorySaver())
 
     final_state = None

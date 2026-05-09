@@ -5,6 +5,7 @@ from typing import Any
 from langgraph.graph import END, StateGraph
 
 from solo_agent.workflow.graph_nodes import (
+    make_architecture_failure_response_node,
     make_build_memory_context_node,
     make_classify_error_node,
     make_collect_context_node,
@@ -12,6 +13,7 @@ from solo_agent.workflow.graph_nodes import (
     make_context_guard_node,
     make_deep_plan_node,
     make_deep_plan_revision_node,
+    make_environment_error_response_node,
     make_execute_tools_node,
     make_inspect_node,
     make_load_builtin_memory_node,
@@ -51,6 +53,20 @@ def _is_blocked(state: SoloGraphState) -> bool:
 
 def _is_awaiting_approval(state: SoloGraphState) -> bool:
     return bool((state.get("agent_state") or {}).get("awaiting_approval", False))
+
+
+def _has_error(state: SoloGraphState) -> bool:
+    return bool(state.get("error"))
+
+
+def _is_architecture_failure(state: SoloGraphState) -> bool:
+    return bool((state.get("error_state") or {}).get("classification") == "architecture_failure")
+
+
+def _error_aware_route(state: SoloGraphState, fallback: str) -> str:
+    if _has_error(state):
+        return "classify_error"
+    return fallback
 
 
 def _memory_enabled_route(state: SoloGraphState) -> str:
@@ -204,8 +220,8 @@ def build_main_workflow_graph(
     graph.add_node("repetition_guard", make_repetition_guard_node())
     graph.add_node("recovery_action", make_recovery_action_node(deps, settings))
     graph.add_node("blocked_response", make_respond_node(provider, settings))
-    graph.add_node("environment_error_response", make_respond_node(provider, settings))
-    graph.add_node("architecture_failure_response", make_respond_node(provider, settings))
+    graph.add_node("environment_error_response", make_environment_error_response_node(provider, settings))
+    graph.add_node("architecture_failure_response", make_architecture_failure_response_node(provider, settings))
 
     # -----------------------------------------------------------------------
     # Postlude: memory sync, persistence, emit completed
@@ -247,7 +263,11 @@ def build_main_workflow_graph(
     )
 
     # Plan mode chain
-    graph.add_edge("deep_plan", "plan_quality_gate")
+    graph.add_conditional_edges(
+        "deep_plan",
+        lambda s: _error_aware_route(s, "plan_quality_gate"),
+        {"plan_quality_gate": "plan_quality_gate", "classify_error": "classify_error"},
+    )
     graph.add_conditional_edges(
         "plan_quality_gate",
         _plan_quality_route,
@@ -256,12 +276,20 @@ def build_main_workflow_graph(
             "deep_plan_revision": "deep_plan_revision",
         },
     )
-    graph.add_edge("deep_plan_revision", "plan_quality_gate")
+    graph.add_conditional_edges(
+        "deep_plan_revision",
+        lambda s: _error_aware_route(s, "plan_quality_gate"),
+        {"plan_quality_gate": "plan_quality_gate", "classify_error": "classify_error"},
+    )
     graph.add_edge("plan_self_review", "plan_response")
     graph.add_edge("plan_response", "sync_memory")
 
     # Agent mode chain
-    graph.add_edge("plan", "task_state")
+    graph.add_conditional_edges(
+        "plan",
+        lambda s: _error_aware_route(s, "task_state"),
+        {"task_state": "task_state", "classify_error": "classify_error"},
+    )
     graph.add_edge("task_state", "parallelism_gate")
 
     graph.add_conditional_edges(
@@ -283,8 +311,8 @@ def build_main_workflow_graph(
     graph.add_edge("select_tools", "execute_tools")
     graph.add_conditional_edges(
         "execute_tools",
-        lambda s: END if _is_awaiting_approval(s) else "spec_compliance_review",
-        {END: END, "spec_compliance_review": "spec_compliance_review"},
+        lambda s: "classify_error" if _has_error(s) else (END if _is_awaiting_approval(s) else "spec_compliance_review"),
+        {END: END, "spec_compliance_review": "spec_compliance_review", "classify_error": "classify_error"},
     )
     # Always route through propose_verified_patch after spec compliance review
     # (the node itself skips if patch already generated)
@@ -292,8 +320,9 @@ def build_main_workflow_graph(
 
     graph.add_conditional_edges(
         "propose_verified_patch",
-        _patch_route,
+        lambda s: "classify_error" if _has_error(s) else _patch_route(s),
         {
+            "classify_error": "classify_error",
             END: END,
             "subdirectory_hint": "subdirectory_hint",
             "propose_verified_patch": "propose_verified_patch",
@@ -301,8 +330,16 @@ def build_main_workflow_graph(
     )
 
     # Parallel path
-    graph.add_edge("parallel_dispatch", "wait_subagents")
-    graph.add_edge("wait_subagents", "supervisor_review")
+    graph.add_conditional_edges(
+        "parallel_dispatch",
+        lambda s: _error_aware_route(s, "wait_subagents"),
+        {"wait_subagents": "wait_subagents", "classify_error": "classify_error"},
+    )
+    graph.add_conditional_edges(
+        "wait_subagents",
+        lambda s: _error_aware_route(s, "supervisor_review"),
+        {"supervisor_review": "supervisor_review", "classify_error": "classify_error"},
+    )
     graph.add_conditional_edges(
         "supervisor_review",
         _supervisor_route,
@@ -321,10 +358,13 @@ def build_main_workflow_graph(
         {END: END, "respond": "respond"},
     )
 
-    graph.add_edge("respond", "sync_memory")
+    graph.add_conditional_edges(
+        "respond",
+        lambda s: _error_aware_route(s, "sync_memory"),
+        {"sync_memory": "sync_memory", "classify_error": "classify_error"},
+    )
 
-    # Error edges from all nodes — catch exceptions and route to classify_error
-    # (implemented as a global handler via error_state checks in key nodes)
+    # Error edges from execution nodes — catch exceptions and route to classify_error
 
     # Postlude with memory conditional
     graph.add_conditional_edges(
@@ -363,32 +403,11 @@ def build_main_workflow_graph(
 
     graph.add_conditional_edges(
         "repetition_guard",
-        lambda s: "recovery_action" if not _is_blocked(s) else "sync_memory",
+        lambda s: "sync_memory" if (_is_blocked(s) or _is_architecture_failure(s)) else "recovery_action",
         {END: END, "recovery_action": "recovery_action", "sync_memory": "sync_memory"},
     )
 
     return graph
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat alias
-# ---------------------------------------------------------------------------
-
-def build_text_provider_graph(
-    *,
-    provider: Any,
-    deps: Any,
-    settings: Any,
-) -> StateGraph:
-    """Backward-compat: delegate to main graph.
-
-    The main workflow graph subsumes the text-provider strategy.
-    """
-    return build_main_workflow_graph(
-        provider=provider,
-        deps=deps,
-        settings=settings,
-    )
 
 
 # ---------------------------------------------------------------------------

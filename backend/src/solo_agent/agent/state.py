@@ -65,6 +65,9 @@ class AgentState:
     previous_node: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
+        return self._base_snapshot()
+
+    def _base_snapshot(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "run_id": self.run_id,
@@ -123,3 +126,53 @@ class AgentState:
             "current_node": self.current_node,
             "previous_node": self.previous_node,
         }
+
+
+@dataclass
+class CoordinatorState(AgentState):
+    research_plan: str = ""
+    supervisor_task_specs: list[dict[str, Any]] = field(default_factory=list)
+    aggregated_results: dict[str, Any] = field(default_factory=dict)
+
+    def snapshot(self) -> dict[str, Any]:
+        base = super().snapshot()
+        base.update({
+            "research_plan": self.research_plan,
+            "supervisor_task_specs": self.supervisor_task_specs,
+            "aggregated_results": self.aggregated_results,
+        })
+        return base
+
+
+@dataclass
+class SupervisorState(AgentState):
+    dispatched_tasks: list[dict[str, Any]] = field(default_factory=list)
+    completed_results: dict[str, Any] = field(default_factory=dict)
+    exploration_loop_count: int = 0
+    supervisor_decision: str = ""
+
+    def snapshot(self) -> dict[str, Any]:
+        base = super().snapshot()
+        base.update({
+            "dispatched_tasks": self.dispatched_tasks,
+            "completed_results": self.completed_results,
+            "exploration_loop_count": self.exploration_loop_count,
+            "supervisor_decision": self.supervisor_decision,
+        })
+        return base
+
+
+@dataclass
+class ResearcherState(AgentState):
+    research_prompt: str = ""
+    subagent_type: str = ""
+    findings: dict[str, Any] = field(default_factory=dict)
+
+    def snapshot(self) -> dict[str, Any]:
+        base = super().snapshot()
+        base.update({
+            "research_prompt": self.research_prompt,
+            "subagent_type": self.subagent_type,
+            "findings": self.findings,
+        })
+        return base

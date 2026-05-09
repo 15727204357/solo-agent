@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import inspect
 import json
@@ -10,7 +10,7 @@ from typing import Any
 from solo_agent.agent.deps import AgentDeps, AgentSettings
 from solo_agent.agent.events import AgentEvent
 from solo_agent.agent.planning import PlanQualityIssue, PlanQualityReport, validate_plan_text
-from solo_agent.agent.policy import BehaviorPolicy, tool_result_ok
+from solo_agent.agent.policy import BehaviorPolicy, first_present, tool_result_ok
 from solo_agent.agent.prompts import (
     PATCH_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
@@ -25,7 +25,7 @@ from solo_agent.agent.prompts import (
     responder_user_prompt,
 )
 from solo_agent.agent.state import AgentState, ToolCallRecord
-from solo_agent.context import ContextManager, ContextTokenEstimator, SubdirectoryHintTracker, TaskListState
+from solo_agent.context import SubdirectoryHintTracker, TaskListState
 from solo_agent.providers import ChatMessage, ChatProvider
 from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequest, build_patch_proposal, extract_patch_request
 from solo_agent.workflow.parallelism import evaluate_independence, extract_task_candidates_from_text
@@ -263,47 +263,11 @@ async def _plan_self_review_stage(
     )
 
 
-async def _plan_mode_path(
+async def _plan_response_stage(
     state: AgentState,
-    provider: ChatProvider,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
 ) -> AsyncIterator[AgentEvent]:
-    """plan 模式策略：只生成深度计划和响应，统一收尾由 runtime 执行。"""
-
-    async for event in _deep_plan_stage(state, provider, settings):
-        yield event
-
-    initial_report = validate_plan_text(state.deep_plan)
-    if not initial_report.passed:
-        async for event in _deep_plan_revision_stage(state, provider, settings, initial_report):
-            yield event
-
-    async for event in _plan_self_review_stage(state, provider, settings):
-        yield event
-
-    yield _event(
-        state,
-        "plan_completed",
-        "deep_plan",
-        "Deep plan completed",
-        {"plan": state.plan, "deep_plan": state.deep_plan, "plan_quality_report": state.plan_quality_report},
-    )
-
-    state.response = _format_plan_mode_response(state.deep_plan, state.plan_quality_report)
-    state.snapshots["response"] = state.response
-    yield _event(
-        state,
-        "response_completed",
-        "respond",
-        "Plan mode response (deep plan)",
-        {"response": state.response},
-    )
-
-
-def _format_plan_mode_response(plan_text: str, quality_report: Mapping[str, Any]) -> str:
-    """Return the plan plus a compact quality report for plan-mode responses."""
-
+    plan_text = state.deep_plan or state.plan or ""
+    quality_report = state.plan_quality_report or {}
     summary = str(quality_report.get("summary") or "Plan quality report unavailable.")
     passed = bool(quality_report.get("passed", False))
     issues = quality_report.get("issues") or []
@@ -317,13 +281,28 @@ def _format_plan_mode_response(plan_text: str, quality_report: Mapping[str, Any]
     if isinstance(issues, list) and issues:
         lines.append("- Issues:")
         for issue in issues:
-            if isinstance(issue, Mapping):
+            if isinstance(issue, dict):
                 issue_type = issue.get("type", "issue")
                 message = issue.get("message", "")
                 location = issue.get("location", "")
                 location_text = f" ({location})" if location else ""
                 lines.append(f"  - {issue_type}: {message}{location_text}")
-    return "\n".join(lines).strip()
+    state.response = "\n".join(lines).strip()
+    state.snapshots["response"] = state.response
+    yield _event(
+        state,
+        "plan_completed",
+        "deep_plan",
+        "Deep plan completed",
+        {"plan": state.plan, "deep_plan": state.deep_plan, "plan_quality_report": state.plan_quality_report},
+    )
+    yield _event(
+        state,
+        "response_completed",
+        "respond",
+        "Plan mode response (deep plan)",
+        {"response": state.response},
+    )
 
 
 async def _skip_memory_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
@@ -1049,11 +1028,11 @@ async def _build_and_store_patch_proposal(
 
 
 def _patch_request_from_apply_arguments(arguments: Mapping[str, Any]) -> PatchRequest:
-    new_text = _first_present(arguments.get("new_text"), arguments.get("new"))
+    new_text = first_present(arguments.get("new_text"), arguments.get("new"))
     edit = PatchEdit(
         path=str(arguments.get("path") or ""),
         expected_hash=str(arguments.get("expected_hash") or ""),
-        old_text=_first_present(arguments.get("old_text"), arguments.get("old")),
+        old_text=first_present(arguments.get("old_text"), arguments.get("old")),
         line_start=arguments.get("line_start"),
         line_end=arguments.get("line_end"),
         new_text=str(new_text or ""),
@@ -1150,77 +1129,6 @@ async def _compress_memory_stage(
     yield _event(
         state, "memory_compress_completed", "compress_memory",
         "Memory compression completed", {},
-    )
-
-
-async def _run_main_compression_recovery(
-    state: AgentState,
-    provider: ChatProvider,
-    settings: AgentSettings | Mapping[str, Any],
-    estimator: ContextTokenEstimator,
-    original_error: Exception,
-) -> Any:
-    manager = ContextManager(
-        settings=settings,
-        main_provider=provider,
-        auxiliary_provider=provider,
-        estimator=estimator,
-    )
-    try:
-        return await manager.maybe_compress(state, estimator=estimator, force=True)
-    except Exception as recovery_error:
-        raise RuntimeError(
-            f"context compression failed: {original_error}; recovery failed: {recovery_error}"
-        ) from recovery_error
-
-
-async def _summary_trigger_met(
-    state: AgentState,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
-) -> bool:
-    if deps.persistence is None:
-        return False
-    trigger = int(_setting(settings, "summary_trigger_messages", 0))
-    if trigger <= 0:
-        return False
-    count = await _call_optional(deps.persistence, "count_messages", state.session_id)
-    expected_count = int(count or 0)
-    if state.response and expected_count == 0:
-        expected_count = 1
-    return expected_count >= trigger
-
-
-async def _persist_context_summary(
-    state: AgentState,
-    deps: AgentDeps,
-    result: Any,
-    *,
-    phase: str,
-) -> None:
-    if deps.persistence is None or not result.compressed:
-        return
-    context_stats = {
-        "compression_count": result.compression_count,
-        "last_estimated_tokens": result.report.current_tokens,
-        "last_threshold": result.report.threshold_ratio,
-        "last_strategy": result.provider_role,
-        "last_model": result.provider_model,
-    }
-    state.snapshots["compression_count"] = result.compression_count
-    state.snapshots["context_stats"] = context_stats
-    state.conversation_context["summary"] = result.summary.strip()
-    await _call_optional(
-        deps.persistence,
-        "append_or_update_summary_snapshot",
-        session_id=state.session_id,
-        run_id=state.run_id,
-        summary=result.summary.strip(),
-        metadata={
-            "source": "context_manager",
-            "phase": phase,
-            "context_stats": context_stats,
-        },
     )
 
 
@@ -1350,18 +1258,6 @@ def _context_compression_payload(state: AgentState) -> dict[str, Any]:
     }
 
 
-def _inject_task_state_block(state: AgentState) -> None:
-    task_state = _task_state_from_snapshot(state.snapshots.get("task_state"))
-    if task_state is None:
-        task_state = TaskListState.from_text(state.plan, thread_id=state.session_id)
-    if not task_state.items:
-        return
-    block = task_state.format_block()
-    state.snapshots["task_state"] = _task_state_to_dict(task_state)
-    state.snapshots["task_state_block"] = block
-    state.memory_context_block = "\n\n".join(part for part in (state.memory_context_block, block) if part)
-
-
 def _task_state_to_dict(task_state: TaskListState) -> dict[str, Any]:
     return task_state.to_dict()
 
@@ -1370,99 +1266,6 @@ def _task_state_from_snapshot(value: Any) -> TaskListState | None:
     if not isinstance(value, Mapping):
         return None
     return TaskListState.from_payload(dict(value), thread_id=str(value.get("thread_id") or value.get("threadID") or ""))
-
-
-async def _maybe_update_summary(
-    state: AgentState,
-    provider: ChatProvider,
-    deps: AgentDeps,
-    settings: AgentSettings | Mapping[str, Any],
-    *,
-    include_response: bool = False,
-) -> AsyncIterator[AgentEvent]:
-    persistence = deps.persistence
-    if persistence is None or not bool(_setting(settings, "memory_enabled", True)):
-        state.summary_status = "skipped"
-        return
-
-    count = await _call_optional(persistence, "count_messages", state.session_id)
-    trigger = int(_setting(settings, "summary_trigger_messages", 8))
-    expected_count = int(count or 0)
-    if include_response and state.response and expected_count == 0:
-        expected_count = 1
-    if expected_count < trigger:
-        state.summary_status = "skipped_threshold"
-        return
-
-    messages = await _call_optional(
-        persistence,
-        "list_messages",
-        state.session_id,
-        limit=min(expected_count, 40),
-    )
-    payload = _on_pre_compress(
-        {
-            "messages": [_message_to_context(message) for message in messages or []],
-            "current_response": state.response if include_response else "",
-            "existing_summary": state.conversation_context.get("summary", ""),
-        }
-    )
-
-    state.summary_status = "compressing"
-    yield _event(
-        state,
-        "memory_compress_started",
-        "memory",
-        "Preparing memory compression",
-        {"message_count": expected_count},
-    )
-    try:
-        await _call_optional(
-            persistence,
-            "on_pre_compress",
-            session_id=state.session_id,
-            payload=payload,
-        )
-        summary = await provider.complete(
-            [
-                ChatMessage(
-                    role="system",
-                    content=(
-                        "Summarize this coding session memory for future turns. "
-                        "Keep user preferences, decisions, unresolved tasks, and important context. "
-                        "Use concise Chinese when possible."
-                    ),
-                ),
-                ChatMessage(role="user", content=str(payload)),
-            ],
-            temperature=float(_setting(settings, "temperature", 0.2)),
-            max_tokens=int(_setting(settings, "summary_max_tokens", 700)),
-        )
-        await _call_optional(
-            persistence,
-            "append_or_update_summary_snapshot",
-            session_id=state.session_id,
-            run_id=state.run_id,
-            summary=summary.strip(),
-            metadata={"source": "model", "message_count": expected_count},
-        )
-        state.summary_status = "updated"
-        yield _event(
-            state,
-            "memory_summary_updated",
-            "memory",
-            "Updated session summary memory",
-            {"message_count": expected_count},
-        )
-    except Exception as exc:
-        state.summary_status = "failed"
-        yield _event(
-            state,
-            "memory_summary_failed",
-            "memory",
-            "Summary update failed; continuing without blocking this run",
-            {"error": str(exc), "message_count": expected_count},
-        )
 
 
 async def _collect_context_with_provider(
@@ -1688,37 +1491,6 @@ async def _call_optional(target: Any | None, method_name: str, *args: Any, **kwa
     return await _maybe_await(method(*args, **kwargs))
 
 
-async def _call_prefetch_all(
-    target: Any | None,
-    *,
-    session_id: str,
-    query: str,
-    recent_limit: int,
-    limit: int,
-    include_history: bool,
-) -> Any:
-    if target is None:
-        return None
-    method = getattr(target, "prefetch_all", None)
-    if method is None:
-        return None
-
-    kwargs = {
-        "session_id": session_id,
-        "query": query,
-        "recent_limit": recent_limit,
-        "limit": limit,
-    }
-    signature = inspect.signature(method)
-    accepts_include_history = "include_history" in signature.parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    if accepts_include_history:
-        kwargs["include_history"] = include_history
-    return await _maybe_await(method(**kwargs))
-
-
 def _event(
     state: AgentState,
     event_type: str,
@@ -1867,13 +1639,6 @@ def _mentions_verified_edit_request(state: AgentState) -> bool:
     )
 
 
-def _first_present(*values: Any) -> Any:
-    for value in values:
-        if value not in (None, ""):
-            return value
-    return None
-
-
 def _extract_path_hint(text: str) -> str | None:
     for token in text.replace("`", " ").split():
         normalized = token.strip(".,:;()[]{}'\"")
@@ -1919,12 +1684,6 @@ def _truncate_tool_result(result: Any, max_bytes: int) -> tuple[Any, dict[str, A
         "content": truncated,
         "original_output_bytes": original_bytes,
     }, metadata
-
-
-def _tool_result_ok(result: Any) -> bool:
-    if isinstance(result, Mapping):
-        return bool(result.get("ok", True))
-    return True
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -2025,113 +1784,9 @@ async def _spec_compliance_review_stage(
     )
 
 
-async def _code_quality_review_stage(
-    state: AgentState,
-    provider: ChatProvider,
-    settings: AgentSettings | Mapping[str, Any],
-) -> AsyncIterator[AgentEvent]:
-    """LLM review of code changes for correctness, maintainability, security."""
-    patch = state.patch_proposal or {}
-    edits = patch.get("edits", []) or []
-
-    findings: list[str] = []
-    if not edits:
-        findings.append("No code changes to review")
-
-    state.review_reports["code_quality"] = {
-        "status": "passed" if not findings else "reviewed",
-        "edits_count": len(edits),
-        "findings": findings,
-    }
-    yield _event(
-        state,
-        "code_quality_review",
-        "code_quality_review",
-        "Code quality review completed",
-        state.review_reports["code_quality"],
-    )
-
-
-async def _response_review_stage(
-    state: AgentState,
-    provider: ChatProvider,
-    settings: AgentSettings | Mapping[str, Any],
-) -> AsyncIterator[AgentEvent]:
-    """Validate final response grounding before emit."""
-    response_text = state.response or ""
-    tool_calls = state.tool_calls or []
-    tool_results_available = any(tc.result is not None for tc in tool_calls)
-
-    issues: list[str] = []
-    if response_text and not tool_results_available:
-        issues.append("Response generated without tool results context")
-    if not response_text:
-        issues.append("Empty response")
-
-    state.review_reports["response"] = {
-        "status": "passed" if not issues else "needs_review",
-        "issues": issues,
-    }
-    yield _event(
-        state,
-        "response_review",
-        "response_review",
-        "Response review completed",
-        state.review_reports["response"],
-    )
-
-
 # ---------------------------------------------------------------------------
 # Error Recovery Stages
 # ---------------------------------------------------------------------------
-
-
-async def _classify_error_stage(
-    state: AgentState,
-) -> AsyncIterator[AgentEvent]:
-    """Delegate to ErrorClassifier, store result in error_state."""
-    from solo_agent.agent.error_classifier import ErrorClassifier
-
-    last_error = state.last_error or {}
-    error_message = last_error.get("error_message", "")
-    error_type = last_error.get("error_type", "Exception")
-
-    error_state = dict(state.error_state or {})
-    error_history = list(error_state.get("error_history", []))
-
-    try:
-        classifier = ErrorClassifier()
-        classification = classifier.classify(
-            Exception(error_message) if error_message else RuntimeError(error_type)
-        )
-        category_str = classification.category if hasattr(classification, "category") else ""
-    except Exception:
-        category_str = "fatal"
-
-    category_out_map = {
-        "retryable": "recoverable_error",
-        "fixable": "recoverable_error",
-        "fatal": "policy_violation",
-        "architectural": "architecture_failure",
-    }
-    classification_out = category_out_map.get(category_str, "policy_violation")
-
-    error_state["classification"] = classification_out
-    error_state["last_error_type"] = error_type
-    error_state["error_history"] = error_history + [{
-        "classification": classification_out,
-        "type": error_type,
-        "message": error_message,
-    }]
-    state.error_state = error_state
-
-    yield _event(
-        state,
-        "error_classified",
-        "classify_error",
-        f"Error classified: {classification_out}",
-        {"classification": classification_out, "error_type": error_type},
-    )
 
 
 async def _recovery_action_stage(
