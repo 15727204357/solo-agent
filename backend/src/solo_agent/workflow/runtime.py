@@ -12,7 +12,8 @@ from solo_agent.workflow.graph_state import agent_state_from_graph_data, initial
 
 
 def _use_multi_agent(settings: Any) -> bool:
-    return bool(getattr(settings, "use_multi_agent", False)) or getattr(settings, "run_mode", "") == "coordinator"
+    run_mode = getattr(settings, "run_mode", "")
+    return bool(getattr(settings, "use_multi_agent", False)) or run_mode in {"research", "coordinator"}
 
 
 class WorkflowRuntime:

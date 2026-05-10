@@ -155,6 +155,14 @@ class SessionRepository(ABC):
     ) -> AsyncIterator[RunEvent | None]:
         raise NotImplementedError
 
+    async def list_run_events(
+            self,
+            session_id: str,
+            run_id: str,
+            limit: int = 300,
+    ) -> list[RunEvent]:
+        raise NotImplementedError
+
 
 class InMemorySessionRepository(SessionRepository):
     def __init__(self) -> None:
@@ -493,6 +501,18 @@ class InMemorySessionRepository(SessionRepository):
             async with self._lock:
                 self._subscribers.get(run_id, set()).discard(queue)
 
+    async def list_run_events(
+            self,
+            session_id: str,
+            run_id: str,
+            limit: int = 300,
+    ) -> list[RunEvent]:
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.session_id != session_id:
+                return []
+            return list(self._events.get(run_id, []))[-limit:]
+
 
 class SQLiteSessionRepository(SessionRepository):
     """Web repository backed by SQLite memory tables plus in-process SSE queues."""
@@ -829,6 +849,19 @@ class SQLiteSessionRepository(SessionRepository):
             async with self._event_lock:
                 self._subscribers.get(run_id, set()).discard(queue)
 
+    async def list_run_events(
+            self,
+            session_id: str,
+            run_id: str,
+            limit: int = 300,
+    ) -> list[RunEvent]:
+        async with self._event_lock:
+            return [
+                       event
+                       for event in self._events.get(run_id, [])
+                       if event.session_id == session_id
+                   ][-limit:]
+
 
 def _session_from_memory(record: object) -> SessionRecord:
     return SessionRecord(
@@ -889,3 +922,4 @@ def _agent_event_data(payload: dict[str, object]) -> dict[str, object]:
     if isinstance(data, dict):
         return data
     return payload
+

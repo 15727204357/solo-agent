@@ -37,6 +37,7 @@ class AgentRunner:
                 )
             )
             run_mode = str(run.metadata.get("run_mode", "agent"))
+            use_multi_agent = run_mode == "research"
             agent_settings = AgentSettings(
                 provider=settings.provider,
                 workspace_root=settings.workspace_root,
@@ -69,6 +70,7 @@ class AgentRunner:
                 verified_editing_enabled=settings.verified_editing_enabled,
                 patch_max_tokens=settings.patch_max_tokens,
                 run_mode=run_mode,
+                use_multi_agent=use_multi_agent,
                 plan_deep_max_tokens=settings.plan_deep_max_tokens,
                 subagent_enabled=settings.subagent_enabled,
                 max_concurrent_subagents=settings.max_concurrent_subagents,

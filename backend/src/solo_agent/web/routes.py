@@ -36,7 +36,7 @@ class CreateRunRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     memory_enabled: bool | None = None
     conversation_history_enabled: bool | None = None
-    run_mode: Literal["agent", "plan"] | None = None
+    run_mode: Literal["agent", "plan", "research"] | None = None
 
 
 class UpdateMemoryCandidateRequest(BaseModel):
@@ -424,6 +424,23 @@ async def approve_run_patch(
     public["ok"] = applied.status == "applied"
     return public
 
+@router.get("/api/sessions/{session_id}/runs/{run_id}/events/history")
+async def list_run_event_history(
+    session_id: str,
+    run_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+    limit: int = 300,
+) -> dict[str, object]:
+    run = await repo.get_run(session_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    bounded_limit = max(1, min(limit, 1000))
+    events = await repo.list_run_events(session_id, run_id, limit=bounded_limit)
+
+    return {
+        "items": [event.to_dict() for event in events],
+    }
 
 @router.get("/api/sessions/{session_id}/runs/{run_id}/events")
 async def stream_run_events(

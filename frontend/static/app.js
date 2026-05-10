@@ -38,6 +38,7 @@ const dom = {
   memoryEntries: document.querySelector("#memory-entries"),
   modeAgent: document.querySelector("#mode-agent"),
   modePlan: document.querySelector("#mode-plan"),
+  modeResearch: document.querySelector("#mode-research"),
 };
 
 const state = {
@@ -645,6 +646,10 @@ async function selectSession(sessionId) {
 
   try {
     const detail = await requestJson(`/api/sessions/${sessionId}`);
+    const latestRun = detail.runs?.[0];
+    if (latestRun?.id) {
+      await loadRunEventHistory(detail.id, latestRun.id);
+    }
     const messages = await requestJson(`/api/sessions/${sessionId}/messages?limit=200`);
     state.activeSession = detail;
     state.activeWorkspace = workspaceKey(detail.workspace_path);
@@ -665,6 +670,24 @@ async function selectSession(sessionId) {
   }
 }
 
+async function loadRunEventHistory(sessionId, runId) {
+  try {
+    const history = await requestJson(
+      `/api/sessions/${sessionId}/runs/${runId}/events/history?limit=300`
+    );
+
+    resetMonitor();
+
+    for (const event of history.items || []) {
+      applyRunEvent(event);
+    }
+
+    dom.formMessage.textContent = `已恢复最近一次运行的 ${history.items?.length || 0} 条关键事件。`;
+  } catch (error) {
+    dom.formMessage.textContent = `历史事件恢复失败：${error.message}`;
+  }
+}
+
 function updateThreadHeader() {
   if (state.activeSession) {
     dom.threadTitle.textContent = state.activeSession.title || "未命名会话";
@@ -681,9 +704,26 @@ function updateThreadHeader() {
   dom.form.classList.remove("continue-mode");
 }
 
+const researchNodes = new Set([
+  "generate_research_plan",
+  "dispatch_researchers",
+  "wait_researchers",
+  "evaluate_results",
+  "supervisor",
+]);
+
+function isResearchWorkflowEvent(event) {
+  const payload = event.payload || {};
+  return (
+    payload.agent_source === "coordinator" ||
+    payload.agent_source === "supervisor" ||
+    researchNodes.has(payload.node)
+  );
+}
+
 function appendTimelineEvent(event) {
-  if (!timelineEvents.has(event.type) || debugOnlyEvents.has(event.type)) {
-    return;
+  if ((!timelineEvents.has(event.type) && !isResearchWorkflowEvent(event)) || debugOnlyEvents.has(event.type)) {
+  return;
   }
   state.monitorState.stageEvents += 1;
   dom.eventCount.textContent = String(state.monitorState.stageEvents);
@@ -701,7 +741,27 @@ function appendTimelineEvent(event) {
   dom.events.append(item);
 }
 
+const noisyRawEvents = new Set([
+  "plan_delta",
+  "deep_plan_delta",
+  "response_delta",
+]);
+
+const maxRawEvents = 200;
+
 function appendRawEvent(event) {
+  // delta 事件只用于流式拼接正文，不进入 raw 调试列表
+  if (noisyRawEvents.has(event.type)) {
+    dom.payloadType.textContent = event.type;
+    dom.latestPayload.textContent = prettyJson({
+      type: event.type,
+      node: event.payload?.node,
+      agent_source: event.payload?.agent_source,
+      message_chars: event.message?.length || 0,
+    });
+    return;
+  }
+
   state.monitorState.rawEvents += 1;
   dom.rawCount.textContent = `${state.monitorState.rawEvents} raw`;
   dom.payloadType.textContent = event.type;
@@ -711,12 +771,18 @@ function appendRawEvent(event) {
   const type = document.createElement("span");
   const message = document.createElement("p");
   const payload = document.createElement("code");
+
   type.className = "raw-type";
   type.textContent = event.type;
   message.textContent = event.message || "";
   payload.textContent = prettyJson(event.payload);
+
   item.append(type, message, payload);
   dom.rawEvents.append(item);
+
+  while (dom.rawEvents.children.length > maxRawEvents) {
+    dom.rawEvents.firstElementChild?.remove();
+  }
 }
 
 function eventLabel(type) {
@@ -924,17 +990,14 @@ function newSessionView() {
 
 function setRunMode(mode) {
   state.runMode = mode;
-  if (mode === "agent") {
-    dom.modeAgent.classList.add("active");
-    dom.modeAgent.setAttribute("aria-checked", "true");
-    dom.modePlan.classList.remove("active");
-    dom.modePlan.setAttribute("aria-checked", "false");
-  } else {
-    dom.modePlan.classList.add("active");
-    dom.modePlan.setAttribute("aria-checked", "true");
-    dom.modeAgent.classList.remove("active");
-    dom.modeAgent.setAttribute("aria-checked", "false");
-  }
+
+  const buttons = [dom.modeAgent, dom.modePlan, dom.modeResearch].filter(Boolean);
+
+  buttons.forEach((button) => {
+    const active = button.dataset.mode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", active ? "true" : "false");
+  });
 }
 
 async function submitRun(event) {
@@ -1041,6 +1104,7 @@ dom.folderPicker.addEventListener("click", chooseFolder);
 dom.memoryRefresh?.addEventListener("click", loadMemoryInbox);
 dom.modeAgent?.addEventListener("click", () => setRunMode("agent"));
 dom.modePlan?.addEventListener("click", () => setRunMode("plan"));
+dom.modeResearch?.addEventListener("click", () => setRunMode("research"));
 
 resetMonitor();
 renderThread();
