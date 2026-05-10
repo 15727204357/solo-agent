@@ -37,7 +37,9 @@ class AgentRunner:
                 )
             )
             run_mode = str(run.metadata.get("run_mode", "agent"))
-            use_multi_agent = run_mode == "research"
+            is_plan_mode = run_mode == "plan"
+            subagent_enabled = False
+            use_multi_agent = run_mode == "coordinator"
             agent_settings = AgentSettings(
                 provider=settings.provider,
                 workspace_root=settings.workspace_root,

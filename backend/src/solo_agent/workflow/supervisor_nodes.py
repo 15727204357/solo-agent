@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from solo_agent.agent.state import ResearcherState
@@ -10,7 +11,30 @@ from solo_agent.workflow.graph_state import (
     coordinator_state_from_graph_data,
     coordinator_state_to_graph_data,
 )
-
+def _append_research_event(
+    graph_state: SoloGraphState,
+    agent_state: Any,
+    *,
+    event_type: str,
+    node: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+    agent_source: str = "supervisor",
+) -> None:
+    events = graph_state.get("events") or []
+    events.append(
+        {
+            "type": event_type,
+            "session_id": agent_state.session_id,
+            "run_id": agent_state.run_id,
+            "node": node,
+            "message": message,
+            "data": data or {},
+            "agent_source": agent_source,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    graph_state["events"] = events
 
 def make_dispatch_researchers_node(deps: Any, settings: Any):
     """Dispatch sub-tasks to parallel researchers via SubagentExecutor."""
@@ -28,6 +52,25 @@ def make_dispatch_researchers_node(deps: Any, settings: Any):
                 "description": agent_state.user_input,
                 "subagent_type": "general-purpose",
             }]
+
+        _append_research_event(
+            graph_state,
+            agent_state,
+            event_type="research_dispatch_started",
+            node="dispatch_researchers",
+            message="Preparing researcher task dispatch",
+            data={
+                "task_count": len(task_specs),
+                "tasks": [
+                    {
+                        "task_id": spec.get("task_id"),
+                        "title": spec.get("title", "")[:120],
+                        "subagent_type": spec.get("subagent_type", "general-purpose"),
+                    }
+                    for spec in task_specs
+                ],
+            },
+        )
 
         workflow_state = WorkflowState.from_agent_state(agent_state)
         from solo_agent.workflow.subagent.executor import SubagentExecutor
@@ -61,6 +104,20 @@ def make_dispatch_researchers_node(deps: Any, settings: Any):
             researcher_states.append(researcher.snapshot())
 
         agent_state.subagent_dispatches = [dict(spec) for spec in task_specs]
+
+        _append_research_event(
+            graph_state,
+            agent_state,
+            event_type="research_dispatch_prepared",
+            node="dispatch_researchers",
+            message="Researcher task dispatch prepared",
+            data={
+                "task_count": len(task_specs),
+                "researcher_state_count": len(researcher_states),
+                "subagent_enabled": bool(getattr(settings, "subagent_enabled", True)),
+            },
+        )
+
         graph_state["agent_state"] = coordinator_state_to_graph_data(agent_state)
         graph_state["supervisor_executor"] = executor
         graph_state["supervisor_workflow_state"] = workflow_state
@@ -116,6 +173,26 @@ def make_wait_researchers_node(settings: Any):
             agent_state.subagent_results = completed
             graph_state["events"] = events
 
+            _append_research_event(
+                graph_state,
+                agent_state,
+                event_type="research_wait_completed",
+                node="wait_researchers",
+                message="Researcher wait step completed",
+                data={
+                    "result_count": len(completed),
+                    "results": [
+                        {
+                            "task_id": rid,
+                            "status": result.get("status"),
+                            "title": result.get("title", "")[:120],
+                        }
+                        for rid, result in completed.items()
+                        if isinstance(result, dict)
+                    ],
+                },
+            )
+
         graph_state["agent_state"] = coordinator_state_to_graph_data(agent_state)
         return graph_state
     return node
@@ -131,8 +208,23 @@ def make_evaluate_results_node(provider: Any, settings: Any):
 
         loop_count = agent_state.snapshots.get("exploration_loop_count", 0)
         if loop_count >= 2:
-            agent_state.snapshots["exploration_decision"] = "summarize_return"
+            decision = "summarize_return"
+            agent_state.snapshots["exploration_decision"] = decision
             agent_state.snapshots["exploration_loop_count"] = loop_count + 1
+
+            _append_research_event(
+                graph_state,
+                agent_state,
+                event_type="research_evaluation_completed",
+                node="evaluate_results",
+                message="Research evaluation completed",
+                data={
+                    "decision": decision,
+                    "loop_count": loop_count + 1,
+                    "reason": "max_exploration_loops_reached",
+                },
+            )
+
             graph_state["agent_state"] = coordinator_state_to_graph_data(agent_state)
             return graph_state
 
@@ -158,6 +250,19 @@ def make_evaluate_results_node(provider: Any, settings: Any):
 
         agent_state.snapshots["exploration_loop_count"] = loop_count + 1
         agent_state.snapshots["exploration_decision"] = decision
+
+        _append_research_event(
+            graph_state,
+            agent_state,
+            event_type="research_evaluation_completed",
+            node="evaluate_results",
+            message="Research evaluation completed",
+            data={
+                "decision": decision,
+                "loop_count": loop_count + 1,
+                "result_count": len(agent_state.subagent_results or {}),
+            },
+        )
 
         graph_state["agent_state"] = coordinator_state_to_graph_data(agent_state)
         return graph_state

@@ -38,8 +38,17 @@ const dom = {
   memoryEntries: document.querySelector("#memory-entries"),
   modeAgent: document.querySelector("#mode-agent"),
   modePlan: document.querySelector("#mode-plan"),
-  modeResearch: document.querySelector("#mode-research"),
 };
+
+const researchEventNames = [
+  "task_started",
+  "task_completed",
+  "task_failed",
+  "research_dispatch_started",
+  "research_dispatch_prepared",
+  "research_wait_completed",
+  "research_evaluation_completed",
+];
 
 const state = {
   sessions: [],
@@ -87,8 +96,21 @@ const timelineEvents = new Set([
   "run_completed",
   "failed",
   "cancelled",
+  "task_started",
+  "task_completed",
+  "task_failed",
+  "research_dispatch_started",
+  "research_dispatch_prepared",
+  "research_wait_completed",
+  "research_evaluation_completed",
 ]);
-const agentEventNames = [...timelineEvents, ...debugOnlyEvents];
+const agentEventNames = [
+  ...new Set([
+    ...timelineEvents,
+    ...debugOnlyEvents,
+    ...researchEventNames,
+  ]),
+];
 const stageByEvent = {
   started: "received",
   run_started: "received",
@@ -808,6 +830,13 @@ function eventLabel(type) {
     run_completed: "完成",
     failed: "失败",
     cancelled: "取消",
+    task_started: "子任务开始",
+    task_completed: "子任务完成",
+    task_failed: "子任务失败",
+    research_dispatch_started: "研究分发开始",
+    research_dispatch_prepared: "研究分发就绪",
+    research_wait_completed: "研究等待完成",
+    research_evaluation_completed: "研究评估完成",
   };
   return labels[type] || type;
 }
@@ -991,7 +1020,7 @@ function newSessionView() {
 function setRunMode(mode) {
   state.runMode = mode;
 
-  const buttons = [dom.modeAgent, dom.modePlan, dom.modeResearch].filter(Boolean);
+  const buttons = [dom.modeAgent, dom.modePlan].filter(Boolean);
 
   buttons.forEach((button) => {
     const active = button.dataset.mode === mode;
@@ -1104,7 +1133,6 @@ dom.folderPicker.addEventListener("click", chooseFolder);
 dom.memoryRefresh?.addEventListener("click", loadMemoryInbox);
 dom.modeAgent?.addEventListener("click", () => setRunMode("agent"));
 dom.modePlan?.addEventListener("click", () => setRunMode("plan"));
-dom.modeResearch?.addEventListener("click", () => setRunMode("research"));
 
 resetMonitor();
 renderThread();
