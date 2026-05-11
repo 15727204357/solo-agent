@@ -36,7 +36,7 @@ class CreateRunRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     memory_enabled: bool | None = None
     conversation_history_enabled: bool | None = None
-    run_mode: Literal["agent", "plan", "research"] | None = None
+    run_mode: Literal["agent", "plan"] | None = None
 
 
 class UpdateMemoryCandidateRequest(BaseModel):

@@ -11,11 +11,6 @@ from solo_agent.workflow.checkpoints import create_checkpointer
 from solo_agent.workflow.graph_state import agent_state_from_graph_data, initial_graph_state
 
 
-def _use_multi_agent(settings: Any) -> bool:
-    run_mode = getattr(settings, "run_mode", "")
-    return bool(getattr(settings, "use_multi_agent", False)) or run_mode == "coordinator"
-
-
 class WorkflowRuntime:
     """Run the workflow graph and stream AgentEvent values.
 
@@ -38,23 +33,19 @@ class WorkflowRuntime:
         """Orchestration path: build graph, compile, stream, update state."""
         settings = self._deps.settings
         gs = initial_graph_state(self._agent_state)
-        is_multi = _use_multi_agent(settings)
-        default_agent_source = "coordinator" if is_multi else "agent"
+        default_agent_source = "agent"
 
-        if is_multi:
-            from solo_agent.workflow.coordinator_graph import build_coordinator_graph
-            graph = build_coordinator_graph(
-                provider=self._provider, deps=self._deps, settings=settings,
-            )
-        else:
-            from solo_agent.workflow.graphs import build_main_workflow_graph
-            graph = build_main_workflow_graph(
-                provider=self._provider, deps=self._deps, settings=settings,
-            )
+        from solo_agent.workflow.graphs import build_main_workflow_graph
+
+        graph = build_main_workflow_graph(
+            provider=self._provider,
+            deps=self._deps,
+            settings=settings,
+        )
         checkpointer = await create_checkpointer(settings)
         compiled = graph.compile(checkpointer=checkpointer if checkpointer else False)
 
-        thread_id = f"{self._agent_state.run_id}/coordinator" if is_multi else self._agent_state.run_id
+        thread_id = self._agent_state.run_id
         config = {"configurable": {"thread_id": thread_id}}
 
         seen_event_keys: set[tuple[str, str, str]] = set()

@@ -39,12 +39,10 @@ class AgentSettings:
     conversation_history_enabled: bool = True
     verified_editing_enabled: bool = False
     patch_max_tokens: int = 1400
-    use_multi_agent: bool = False
     run_mode: str = "agent"
     is_plan_mode: bool = False
     subagent_enabled: bool = False
     plan_deep_max_tokens: int = 6000
-    subagent_enabled: bool = True
     max_concurrent_subagents: int = 3
     subagent_timeout_seconds: int = 900
     sandbox_mode: str = "local"

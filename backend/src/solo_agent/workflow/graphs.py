@@ -77,9 +77,6 @@ def _memory_enabled_route(state: SoloGraphState) -> str:
 
 
 def _run_mode_route(state: SoloGraphState) -> str:
-    agent_data = state.get("agent_state") or {}
-    if agent_data.get("run_mode", "agent") == "plan":
-        return "deep_plan"
     return "plan"
 
 

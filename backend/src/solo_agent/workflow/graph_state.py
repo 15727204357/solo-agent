@@ -56,6 +56,7 @@ def _parse_common_fields(data: dict[str, Any]) -> dict[str, Any]:
         "user_input": str(data.get("user_input", "")),
         "loop_stage": str(data.get("loop_stage", "initialized")),
         "run_mode": str(data.get("run_mode", "agent")),
+        "is_plan_mode": bool(data.get("is_plan_mode", False)),
         "memory_enabled": bool(data.get("memory_enabled", True)),
         "conversation_history_enabled": bool(data.get("conversation_history_enabled", True)),
         "memory_budget": dict(data.get("memory_budget") or {}),

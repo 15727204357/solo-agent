@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     plan_deep_max_tokens: int = 6000
 
     # DeerFlow-style workflow runtime settings.
-    subagent_enabled: bool = True
+    subagent_enabled: bool = False
     max_concurrent_subagents: int = 3
     subagent_timeout_seconds: int = 900
     sandbox_mode: str = "local"

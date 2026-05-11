@@ -39,6 +39,7 @@ async def _receive_user_turn_stage(
 ) -> AsyncIterator[AgentEvent]:
     state.loop_stage = "receive_user_turn"
     state.run_mode = str(_setting(settings, "run_mode", "agent"))
+    state.is_plan_mode = bool(_setting(settings, "is_plan_mode", False))
     state.memory_enabled = bool(_setting(settings, "memory_enabled", True))
     state.conversation_history_enabled = bool(
         _setting(settings, "conversation_history_enabled", True)
@@ -70,6 +71,7 @@ async def _receive_user_turn_stage(
         "Received user turn",
         {
             "run_mode": state.run_mode,
+            "is_plan_mode": state.is_plan_mode,
             "memory_enabled": state.memory_enabled,
             "conversation_history_enabled": state.conversation_history_enabled,
             "tool_budget": state.snapshots["tool_budget"],
@@ -84,8 +86,25 @@ async def _plan_node(
     settings: AgentSettings | Mapping[str, Any],
 ) -> AsyncIterator[AgentEvent]:
     yield _event(state, "plan_started", "plan", "Planning task")
+    plan_mode_enabled = bool(
+        getattr(state, "is_plan_mode", False)
+        or _setting(settings, "is_plan_mode", False)
+    )
+
+    system_prompt = PLANNER_SYSTEM_PROMPT
+
+    if plan_mode_enabled:
+        system_prompt += """
+
+    <plan_mode>
+    The user enabled Plan mode. Before acting, create a clear, step-by-step execution plan.
+    Use the plan to guide the rest of the run, but do not stop after planning.
+    Prefer explicit phases, success criteria, risks, and verification steps.
+    Keep the plan concise enough to execute.
+    </plan_mode>
+    """
     messages = [
-        ChatMessage(role="system", content=PLANNER_SYSTEM_PROMPT),
+        ChatMessage(role="system", content=system_prompt),
         ChatMessage(
             role="user",
             content=planner_user_prompt(
@@ -462,16 +481,11 @@ async def _skill_context_stage(
         state.skill_budget,
     )
 
-    selected_result = None
-    if state.run_mode == "plan":
-        # plan 模式不能执行工具；skill 工具选择留到真正执行阶段。
-        state.snapshots["skill_selection_skipped"] = {"reason": "plan_mode_no_tool_execution"}
-    else:
-        selected_result = await _call_tool_if_available(
-            deps.tool_registry,
-            "select_relevant_skills",
-            {"task": state.user_input, "plan": state.plan, "max_skills": max_skills},
-        )
+    selected_result = await _call_tool_if_available(
+        deps.tool_registry,
+        "select_relevant_skills",
+        {"task": state.user_input, "plan": state.plan, "max_skills": max_skills},
+    )
     selected = _extract_tool_result(selected_result).get("skills", []) if selected_result else []
     state.selected_skills = [dict(skill) for skill in selected[:max_skills] if isinstance(skill, Mapping)]
     yield _event(

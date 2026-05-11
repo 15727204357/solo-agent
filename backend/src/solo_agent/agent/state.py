@@ -20,6 +20,7 @@ class AgentState:
     user_input: str
     loop_stage: str = "initialized"
     run_mode: str = "agent"
+    is_plan_mode: bool = False
     memory_enabled: bool = True
     conversation_history_enabled: bool = True
     memory_budget: dict[str, Any] = field(default_factory=dict)
@@ -74,6 +75,7 @@ class AgentState:
             "user_input": self.user_input,
             "loop_stage": self.loop_stage,
             "run_mode": self.run_mode,
+            "is_plan_mode": self.is_plan_mode,
             "memory_enabled": self.memory_enabled,
             "conversation_history_enabled": self.conversation_history_enabled,
             "memory_budget": self.memory_budget,

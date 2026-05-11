@@ -39,7 +39,6 @@ class AgentRunner:
             run_mode = str(run.metadata.get("run_mode", "agent"))
             is_plan_mode = run_mode == "plan"
             subagent_enabled = False
-            use_multi_agent = run_mode == "coordinator"
             agent_settings = AgentSettings(
                 provider=settings.provider,
                 workspace_root=settings.workspace_root,
@@ -72,9 +71,9 @@ class AgentRunner:
                 verified_editing_enabled=settings.verified_editing_enabled,
                 patch_max_tokens=settings.patch_max_tokens,
                 run_mode=run_mode,
-                use_multi_agent=use_multi_agent,
+                is_plan_mode=is_plan_mode,
                 plan_deep_max_tokens=settings.plan_deep_max_tokens,
-                subagent_enabled=settings.subagent_enabled,
+                subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=settings.max_concurrent_subagents,
                 subagent_timeout_seconds=settings.subagent_timeout_seconds,
                 sandbox_mode=settings.sandbox_mode,

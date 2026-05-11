@@ -44,10 +44,6 @@ const researchEventNames = [
   "task_started",
   "task_completed",
   "task_failed",
-  "research_dispatch_started",
-  "research_dispatch_prepared",
-  "research_wait_completed",
-  "research_evaluation_completed",
 ];
 
 const state = {
@@ -108,7 +104,7 @@ const agentEventNames = [
   ...new Set([
     ...timelineEvents,
     ...debugOnlyEvents,
-    ...researchEventNames,
+    ...taskEventNames,
   ]),
 ];
 const stageByEvent = {
@@ -726,26 +722,11 @@ function updateThreadHeader() {
   dom.form.classList.remove("continue-mode");
 }
 
-const researchNodes = new Set([
-  "generate_research_plan",
-  "dispatch_researchers",
-  "wait_researchers",
-  "evaluate_results",
-  "supervisor",
-]);
 
-function isResearchWorkflowEvent(event) {
-  const payload = event.payload || {};
-  return (
-    payload.agent_source === "coordinator" ||
-    payload.agent_source === "supervisor" ||
-    researchNodes.has(payload.node)
-  );
-}
 
 function appendTimelineEvent(event) {
-  if ((!timelineEvents.has(event.type) && !isResearchWorkflowEvent(event)) || debugOnlyEvents.has(event.type)) {
-  return;
+  if (!timelineEvents.has(event.type) || debugOnlyEvents.has(event.type)) {
+    return;
   }
   state.monitorState.stageEvents += 1;
   dom.eventCount.textContent = String(state.monitorState.stageEvents);
@@ -833,10 +814,6 @@ function eventLabel(type) {
     task_started: "子任务开始",
     task_completed: "子任务完成",
     task_failed: "子任务失败",
-    research_dispatch_started: "研究分发开始",
-    research_dispatch_prepared: "研究分发就绪",
-    research_wait_completed: "研究等待完成",
-    research_evaluation_completed: "研究评估完成",
   };
   return labels[type] || type;
 }
