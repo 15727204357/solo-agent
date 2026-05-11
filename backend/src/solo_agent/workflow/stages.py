@@ -9,7 +9,6 @@ from typing import Any
 
 from solo_agent.agent.deps import AgentDeps, AgentSettings
 from solo_agent.agent.events import AgentEvent
-from solo_agent.agent.planning import PlanQualityIssue, PlanQualityReport, validate_plan_text
 from solo_agent.agent.policy import BehaviorPolicy, first_present, tool_result_ok
 from solo_agent.agent.prompts import (
     PATCH_SYSTEM_PROMPT,

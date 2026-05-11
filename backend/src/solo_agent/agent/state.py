@@ -26,8 +26,6 @@ class AgentState:
     memory_budget: dict[str, Any] = field(default_factory=dict)
     summary_status: str = "not_started"
     plan: str = ""
-    deep_plan: str = ""
-    plan_quality_report: dict[str, Any] = field(default_factory=dict)
     conversation_context: dict[str, Any] = field(default_factory=dict)
     memory_context_block: str = ""
     memory_warnings: list[str] = field(default_factory=list)

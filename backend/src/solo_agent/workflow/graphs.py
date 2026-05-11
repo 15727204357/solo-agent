@@ -71,9 +71,6 @@ def _memory_enabled_route(state: SoloGraphState) -> str:
     return "skip_memory"
 
 
-def _run_mode_route(state: SoloGraphState) -> str:
-    return "plan"
-
 
 
 def _execution_strategy_route(state: SoloGraphState) -> str:

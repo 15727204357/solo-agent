@@ -62,8 +62,6 @@ def _parse_common_fields(data: dict[str, Any]) -> dict[str, Any]:
         "memory_budget": dict(data.get("memory_budget") or {}),
         "summary_status": str(data.get("summary_status", "not_started")),
         "plan": str(data.get("plan", "")),
-        "deep_plan": str(data.get("deep_plan", "")),
-        "plan_quality_report": dict(data.get("plan_quality_report") or {}),
         "conversation_context": dict(data.get("conversation_context") or {}),
         "memory_context_block": str(data.get("memory_context_block", "")),
         "memory_warnings": list(data.get("memory_warnings") or []),
