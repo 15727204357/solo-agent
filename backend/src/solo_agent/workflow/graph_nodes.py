@@ -14,8 +14,6 @@ from solo_agent.workflow.stages import (
     _collect_context_node,
     _compress_memory_stage,
     _context_guard_stage,
-    _deep_plan_revision_stage,
-    _deep_plan_stage,
     _environment_error_response_stage,
     _execute_tools_node,
     _inspect_node,
@@ -23,8 +21,6 @@ from solo_agent.workflow.stages import (
     _parallelism_gate_stage,
     _persist_snapshot_stage,
     _plan_node,
-    _plan_response_stage,
-    _plan_self_review_stage,
     _prefetch_memory_stage,
     _propose_verified_patch_node,
     _queue_prefetch_stage,
@@ -164,77 +160,6 @@ def make_compress_memory_node(provider: Any, deps: Any, settings: Any):
 def make_persist_snapshot_node():
     return _make_node(_persist_snapshot_stage)
 
-
-# ---------------------------------------------------------------------------
-# Plan-mode nodes
-# ---------------------------------------------------------------------------
-
-def make_deep_plan_node(provider: Any, settings: Any):
-    return _make_node(_deep_plan_stage, provider, settings)
-
-
-def make_plan_quality_gate_node(settings: Any):
-    """Deterministic plan quality check using validate_plan_text."""
-    from solo_agent.agent.planning import validate_plan_text
-
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        plan_text = agent_state.deep_plan or agent_state.plan
-        report = validate_plan_text(plan_text)
-        agent_state.plan_quality_report = {
-            "passed": report.passed,
-            "issues": [{"type": i.type, "message": i.message, "severity": i.severity} for i in report.issues],
-            "summary": report.summary,
-        }
-        graph_state["events"] = (graph_state.get("events") or []) + [{
-            "type": "plan_quality_gate",
-            "session_id": agent_state.session_id,
-            "run_id": agent_state.run_id,
-            "node": "plan_quality_gate",
-            "message": f"Plan quality gate: {'passed' if report.passed else 'failed'}",
-            "data": agent_state.plan_quality_report,
-        }]
-        graph_state["agent_state"] = agent_state_to_graph_data(agent_state)
-        return graph_state
-    return node
-
-
-def make_deep_plan_revision_node(provider: Any, settings: Any):
-    async def node(graph_state: SoloGraphState) -> SoloGraphState:
-        from solo_agent.agent.planning import PlanQualityIssue, PlanQualityReport
-
-        agent_state = agent_state_from_graph_data(graph_state["agent_state"])
-        quality_report = agent_state.plan_quality_report
-        if not isinstance(quality_report, PlanQualityReport):
-            issues = [PlanQualityIssue(
-                type=issue.get("type", "unknown"),
-                pattern=issue.get("pattern", ""),
-                message=issue.get("message", ""),
-                location=issue.get("location", ""),
-            ) for issue in (quality_report.get("issues") or [])]
-            quality_report = PlanQualityReport(
-                passed=False,
-                issues=issues,
-                summary=quality_report.get("summary", ""),
-            )
-        updated, events, error = await _run_stage_async(
-            agent_state, _deep_plan_revision_stage, provider, settings, quality_report
-        )
-        graph_state["agent_state"] = agent_state_to_graph_data(updated)
-        if events:
-            graph_state["events"] = (graph_state.get("events") or []) + events
-        if error:
-            graph_state["error"] = error
-        return graph_state
-    return node
-
-
-def make_plan_self_review_node(provider: Any, settings: Any):
-    return _make_node(_plan_self_review_stage, provider, settings)
-
-
-def make_plan_response_node(provider: Any, settings: Any):
-    return _make_node(_plan_response_stage)
 
 
 # ---------------------------------------------------------------------------

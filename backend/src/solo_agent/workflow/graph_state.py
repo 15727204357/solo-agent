@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from solo_agent.agent.state import AgentState, CoordinatorState, ResearcherState, SupervisorState, ToolCallRecord
+from solo_agent.agent.state import AgentState, ToolCallRecord
 
 SoloGraphState = dict[str, Any]
 
@@ -100,35 +100,7 @@ def _parse_common_fields(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def coordinator_state_from_graph_data(data: dict[str, Any]) -> CoordinatorState:
-    common = _parse_common_fields(data)
-    return CoordinatorState(
-        **common,
-        research_plan=str(data.get("research_plan", "")),
-        supervisor_task_specs=list(data.get("supervisor_task_specs") or []),
-        aggregated_results=dict(data.get("aggregated_results") or {}),
-    )
 
-
-def supervisor_state_from_graph_data(data: dict[str, Any]) -> SupervisorState:
-    common = _parse_common_fields(data)
-    return SupervisorState(
-        **common,
-        dispatched_tasks=list(data.get("dispatched_tasks") or []),
-        completed_results=dict(data.get("completed_results") or {}),
-        exploration_loop_count=int(data.get("exploration_loop_count", 0)),
-        supervisor_decision=str(data.get("supervisor_decision", "")),
-    )
-
-
-def researcher_state_from_graph_data(data: dict[str, Any]) -> ResearcherState:
-    common = _parse_common_fields(data)
-    return ResearcherState(
-        **common,
-        research_prompt=str(data.get("research_prompt", "")),
-        subagent_type=str(data.get("subagent_type", "")),
-        findings=dict(data.get("findings") or {}),
-    )
 
 
 def _base_graph_dict(agent_data: dict[str, Any]) -> SoloGraphState:
@@ -154,28 +126,6 @@ def initial_graph_state(state: AgentState) -> SoloGraphState:
     return _base_graph_dict(agent_state_to_graph_data(state))
 
 
-def initial_coordinator_graph_state(state: CoordinatorState) -> SoloGraphState:
-    return _base_graph_dict(coordinator_state_to_graph_data(state))
-
-
-def initial_supervisor_graph_state(state: SupervisorState) -> SoloGraphState:
-    return _base_graph_dict(supervisor_state_to_graph_data(state))
-
-
-def initial_researcher_graph_state(state: ResearcherState) -> SoloGraphState:
-    return _base_graph_dict(researcher_state_to_graph_data(state))
-
-
-def coordinator_state_to_graph_data(state: CoordinatorState) -> dict[str, Any]:
-    return state.snapshot()
-
-
-def supervisor_state_to_graph_data(state: SupervisorState) -> dict[str, Any]:
-    return state.snapshot()
-
-
-def researcher_state_to_graph_data(state: ResearcherState) -> dict[str, Any]:
-    return state.snapshot()
 
 
 def update_from_agent_state(

@@ -40,7 +40,7 @@ const dom = {
   modePlan: document.querySelector("#mode-plan"),
 };
 
-const researchEventNames = [
+const taskEventNames = [
   "task_started",
   "task_completed",
   "task_failed",
@@ -74,9 +74,6 @@ const timelineEvents = new Set([
   "run_started",
   "plan_started",
   "plan_completed",
-  "deep_plan_started",
-  "deep_plan_delta",
-  "plan_self_review_completed",
   "context_started",
   "context_completed",
   "inspect_started",
@@ -95,10 +92,6 @@ const timelineEvents = new Set([
   "task_started",
   "task_completed",
   "task_failed",
-  "research_dispatch_started",
-  "research_dispatch_prepared",
-  "research_wait_completed",
-  "research_evaluation_completed",
 ]);
 const agentEventNames = [
   ...new Set([
@@ -113,9 +106,6 @@ const stageByEvent = {
   plan_started: "plan",
   plan_delta: "plan",
   plan_completed: "plan",
-  deep_plan_started: "plan",
-  deep_plan_delta: "plan",
-  plan_self_review_completed: "plan",
   context_started: "context",
   context_completed: "context",
   inspect_started: "inspect",
@@ -137,7 +127,6 @@ const completedEvents = new Set([
   "started",
   "run_started",
   "plan_completed",
-  "plan_self_review_completed",
   "context_completed",
   "inspect_completed",
   "tool_call_completed",
@@ -794,8 +783,6 @@ function eventLabel(type) {
     run_started: "开始",
     plan_started: "规划中",
     plan_completed: "规划完成",
-    deep_plan_started: "深度规划",
-    plan_self_review_completed: "自检完成",
     context_started: "上下文",
     context_completed: "上下文完成",
     inspect_started: "安全检查",
@@ -878,26 +865,6 @@ function applyRunEvent(event) {
     renderThread();
   }
 
-  if (event.type === "deep_plan_started") {
-    if (!state.activeAssistantMessage) {
-      state.activeAssistantMessage = createMessage("plan", "", "深度计划流式输出");
-      state.threadMessages.push(state.activeAssistantMessage);
-      renderThread();
-    }
-  }
-
-  if (event.type === "deep_plan_delta") {
-    if (!state.activeAssistantMessage) {
-      state.activeAssistantMessage = createMessage("plan", "", "深度计划流式输出");
-      state.threadMessages.push(state.activeAssistantMessage);
-      renderThread();
-    }
-    appendMessageContent(state.activeAssistantMessage, event.message || "");
-    state.monitorState.planChars = (state.activeAssistantMessage.content || "").length;
-    dom.planCount.textContent = String(state.monitorState.planChars);
-    dom.planSummary.classList.remove("empty-state");
-    dom.planSummary.textContent = state.activeAssistantMessage.content;
-  }
 
   if (event.type === "plan_self_review_completed") {
     const reviewData = data.plan_quality_report || data;

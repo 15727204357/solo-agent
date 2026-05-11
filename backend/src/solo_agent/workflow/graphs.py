@@ -11,8 +11,6 @@ from solo_agent.workflow.graph_nodes import (
     make_collect_context_node,
     make_compress_memory_node,
     make_context_guard_node,
-    make_deep_plan_node,
-    make_deep_plan_revision_node,
     make_environment_error_response_node,
     make_execute_tools_node,
     make_inspect_node,
@@ -20,9 +18,6 @@ from solo_agent.workflow.graph_nodes import (
     make_parallelism_gate_node,
     make_persist_snapshot_node,
     make_plan_node,
-    make_plan_quality_gate_node,
-    make_plan_response_node,
-    make_plan_self_review_node,
     make_prefetch_memory_node,
     make_propose_verified_patch_node,
     make_queue_prefetch_node,
@@ -79,13 +74,6 @@ def _memory_enabled_route(state: SoloGraphState) -> str:
 def _run_mode_route(state: SoloGraphState) -> str:
     return "plan"
 
-
-def _plan_quality_route(state: SoloGraphState) -> str:
-    agent_data = state.get("agent_state") or {}
-    report = agent_data.get("plan_quality_report") or {}
-    if report.get("passed", True):
-        return "plan_self_review"
-    return "deep_plan_revision"
 
 
 def _execution_strategy_route(state: SoloGraphState) -> str:
@@ -145,7 +133,7 @@ def build_main_workflow_graph(
 
     This is the SOLE orchestration graph covering all execution modes in a
     single unified topology:
-      - plan mode (deep plan → quality gate → revision → self-review → response)
+      - plan capability mode: same execution graph, stronger planning prompt
       - agent serial (plan → context → inspect → tools → review → respond)
       - agent parallel (plan → gate → dispatch → subagents → supervisor → respond)
       - verified editing (propose → await approval → apply → verify → review)
@@ -171,11 +159,6 @@ def build_main_workflow_graph(
     # -----------------------------------------------------------------------
     graph.add_node("plan", make_plan_node(provider, settings))
     graph.add_node("task_state", make_task_state_node())
-    graph.add_node("deep_plan", make_deep_plan_node(provider, settings))
-    graph.add_node("plan_quality_gate", make_plan_quality_gate_node(settings))
-    graph.add_node("deep_plan_revision", make_deep_plan_revision_node(provider, settings))
-    graph.add_node("plan_self_review", make_plan_self_review_node(provider, settings))
-    graph.add_node("plan_response", make_plan_response_node(provider, settings))
 
     # -----------------------------------------------------------------------
     # Agent serial path
@@ -250,36 +233,7 @@ def build_main_workflow_graph(
     graph.add_edge("skill_context", "context_guard_before_plan")
 
     # Plan vs agent route
-    graph.add_conditional_edges(
-        "context_guard_before_plan",
-        _run_mode_route,
-        {
-            "deep_plan": "deep_plan",
-            "plan": "plan",
-        },
-    )
-
-    # Plan mode chain
-    graph.add_conditional_edges(
-        "deep_plan",
-        lambda s: _error_aware_route(s, "plan_quality_gate"),
-        {"plan_quality_gate": "plan_quality_gate", "classify_error": "classify_error"},
-    )
-    graph.add_conditional_edges(
-        "plan_quality_gate",
-        _plan_quality_route,
-        {
-            "plan_self_review": "plan_self_review",
-            "deep_plan_revision": "deep_plan_revision",
-        },
-    )
-    graph.add_conditional_edges(
-        "deep_plan_revision",
-        lambda s: _error_aware_route(s, "plan_quality_gate"),
-        {"plan_quality_gate": "plan_quality_gate", "classify_error": "classify_error"},
-    )
-    graph.add_edge("plan_self_review", "plan_response")
-    graph.add_edge("plan_response", "sync_memory")
+    graph.add_edge("context_guard_before_plan", "plan")
 
     # Agent mode chain
     graph.add_conditional_edges(
