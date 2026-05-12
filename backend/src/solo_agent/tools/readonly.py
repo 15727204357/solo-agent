@@ -556,6 +556,141 @@ class WorkspaceTools:
         selected = sorted(scored, key=lambda item: (-item["score"], _skill_category_rank(item), item["path"]))[:limit]
         return {"skills": selected, "truncated": listed["truncated"]}
 
+    def task(
+        self,
+        description: str,
+        prompt: str,
+        *,
+        subagent_type: str = "general-purpose",
+        task_id: str = "",
+        read_paths: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        timeout_seconds: int | None = None,
+        thread_id: str = "",
+    ) -> dict[str, Any]:
+        """Run a synchronous scoped read-only subtask over workspace context."""
+
+        normalized_description = str(description or "").strip()
+        normalized_prompt = str(prompt or "").strip()
+        normalized_type = str(subagent_type or "general-purpose").strip() or "general-purpose"
+        normalized_read_paths = [str(path).strip() for path in (read_paths or []) if str(path).strip()]
+        normalized_allowed_tools = [
+            str(tool).strip()
+            for tool in (allowed_tools or ["workspace_snapshot", "list_files", "read_file", "search_text"])
+            if str(tool).strip()
+        ]
+        normalized_timeout = max(1, min(int(timeout_seconds or 300), 3600))
+        generated_task_id = task_id.strip() if task_id else _stable_task_id(
+            normalized_description,
+            normalized_prompt,
+            normalized_type,
+            normalized_read_paths,
+            thread_id,
+        )
+
+        def failed(message: str) -> dict[str, Any]:
+            return {
+                "task_id": generated_task_id,
+                "subagent_type": normalized_type,
+                "description": normalized_description,
+                "status": "failed",
+                "result": "",
+                "evidence": [],
+                "read_paths": normalized_read_paths,
+                "metadata": {
+                    "thread_id": thread_id,
+                    "allowed_tools": normalized_allowed_tools,
+                    "timeout_seconds": normalized_timeout,
+                    "mode": "sync_readonly",
+                },
+                "error": message,
+            }
+
+        if not normalized_description:
+            return failed("description must not be empty")
+        if not normalized_prompt:
+            return failed("prompt must not be empty")
+
+        scoped_paths = normalized_read_paths or ["."]
+        evidence: list[dict[str, Any]] = []
+        try:
+            for path in scoped_paths:
+                resolved = self._resolve_inside_workspace(path)
+                if not resolved.exists():
+                    return failed(f"read_path does not exist: {path}")
+                if self._is_excluded(resolved):
+                    raise PermissionError(f"Reading excluded or secret path is not allowed: {path}")
+                relative_path = self._relative(resolved)
+                if resolved.is_file():
+                    if not self._is_text_candidate(resolved, glob="*", max_file_bytes=256_000):
+                        evidence.append(
+                            {
+                                "tool": "get_file_hash",
+                                "path": relative_path,
+                                "result": self.get_file_hash(relative_path),
+                            }
+                        )
+                        continue
+                    file_result = self.read_file(relative_path, max_bytes=16_000)
+                    evidence.append(
+                        {
+                            "tool": "read_file",
+                            "path": relative_path,
+                            "result": {
+                                **file_result,
+                                "content": _truncate_text(str(file_result.get("content", "")), 4_000)["text"],
+                            },
+                        }
+                    )
+                else:
+                    evidence.append(
+                        {
+                            "tool": "workspace_snapshot",
+                            "path": relative_path,
+                            "result": self.workspace_snapshot(relative_path, max_entries=80),
+                        }
+                    )
+
+            keywords = _task_search_keywords(f"{normalized_description}\n{normalized_prompt}")
+            for keyword in keywords:
+                for path in scoped_paths[:5]:
+                    search_result = self.search_text(keyword, path=path, max_matches=10, max_file_bytes=256_000)
+                    if search_result.get("matches"):
+                        evidence.append({"tool": "search_text", "path": path, "query": keyword, "result": search_result})
+        except PermissionError:
+            raise
+        except Exception as exc:
+            return failed(str(exc))
+
+        inspected_paths = sorted({str(item.get("path", "")) for item in evidence if item.get("path")})
+        match_count = sum(
+            len((item.get("result") or {}).get("matches", []))
+            for item in evidence
+            if item.get("tool") == "search_text" and isinstance(item.get("result"), Mapping)
+        )
+        result_text = (
+            f"Completed scoped read-only subtask '{normalized_description}'. "
+            f"Inspected {len(inspected_paths)} path(s), collected {len(evidence)} evidence item(s), "
+            f"and found {match_count} text match(es)."
+        )
+        return {
+            "task_id": generated_task_id,
+            "subagent_type": normalized_type,
+            "description": normalized_description,
+            "status": "completed",
+            "result": result_text,
+            "evidence": evidence,
+            "read_paths": scoped_paths,
+            "metadata": {
+                "thread_id": thread_id,
+                "allowed_tools": normalized_allowed_tools,
+                "timeout_seconds": normalized_timeout,
+                "mode": "sync_readonly",
+                "evidence_count": len(evidence),
+                "match_count": match_count,
+            },
+        }
+
     def task_create(
         self,
         thread_id: str,
@@ -929,6 +1064,49 @@ def _truncate_text(text: str, max_bytes: int) -> dict[str, Any]:
         "text": raw[:max_bytes].decode("utf-8", errors="replace") + "\n...[truncated]",
         "truncated": True,
     }
+
+
+def _stable_task_id(
+    description: str,
+    prompt: str,
+    subagent_type: str,
+    read_paths: Sequence[str],
+    thread_id: str,
+) -> str:
+    payload = "\n".join([thread_id, subagent_type, description, prompt, *read_paths])
+    return f"task_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _task_search_keywords(text: str) -> list[str]:
+    stop_words = {
+        "about",
+        "after",
+        "also",
+        "with",
+        "from",
+        "into",
+        "this",
+        "that",
+        "the",
+        "and",
+        "for",
+        "task",
+        "subtask",
+        "prompt",
+    }
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", text)
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for token in tokens:
+        normalized = token.strip()
+        key = normalized.casefold()
+        if key in stop_words or key in seen:
+            continue
+        seen.add(key)
+        keywords.append(normalized)
+        if len(keywords) >= 3:
+            break
+    return keywords
 
 
 def _display_command(command: Sequence[str]) -> str:

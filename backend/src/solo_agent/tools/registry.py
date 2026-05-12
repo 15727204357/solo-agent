@@ -46,9 +46,11 @@ class ToolRegistry:
         workspace_root: str | Path,
         inspectors: list[Inspector] | None = None,
         is_plan_mode: bool = False,
+        subagent_enabled: bool = False,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.is_plan_mode = is_plan_mode
+        self.subagent_enabled = subagent_enabled
         self._tools: dict[str, ToolSpec] = {}
         self.inspectors: list[Inspector] = inspectors or [
             SecurityInspector(),
@@ -368,6 +370,26 @@ class ToolRegistry:
                     },
                 )
             )
+        if self.subagent_enabled:
+            self.register(
+                ToolSpec(
+                    name="task",
+                    description="Run a focused subagent task with scoped context and return structured findings.",
+                    read_only=True,
+                    handler=self._workspace_tools.task,
+                    category="subagent",
+                    risk_level="medium",
+                    parameters={
+                        "description": "Short subtask description for trace events.",
+                        "prompt": "Complete self-contained subagent instructions.",
+                        "subagent_type": "Subagent kind, such as general-purpose, code-review, research, or quality.",
+                        "task_id": "Optional stable task id. Generated when omitted.",
+                        "read_paths": "Optional workspace-relative paths the subagent should focus on.",
+                        "allowed_tools": "Optional read-only tool names available to the subagent.",
+                        "timeout_seconds": "Optional timeout budget for the subtask.",
+                    },
+                )
+            )
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [
@@ -446,7 +468,10 @@ class ToolRegistry:
 
         output = dict(result)
         metadata = self._metadata(spec, truncated=bool(output.get("truncated", False)))
-        metadata.update(dict(output.pop("metadata", {})))
+        if spec.category == "subagent":
+            metadata.update(dict(output.get("metadata", {})))
+        else:
+            metadata.update(dict(output.pop("metadata", {})))
         return {"ok": True, "tool": name, "result": output, "metadata": metadata}
 
     def _inspect_with_registered_tool(
@@ -463,7 +488,7 @@ class ToolRegistry:
 
         combined = " ".join(_flatten_values(call.arguments))
         text_result = inspector.inspect_text(combined)
-        if spec.category == "task" and text_result.allowed:
+        if spec.category in {"task", "subagent"} and text_result.allowed:
             return InspectionResult.allow({"tool": call.name, "task_state_tool": True})
         if text_result.code == "write_not_allowed" and spec.category == "edit":
             return InspectionResult.allow({"tool": call.name, "safe_edit_tool": True})
@@ -506,5 +531,14 @@ def _redact_large_text(value: str) -> str:
     return re.sub(r"\s+", " ", value[:4_000])
 
 
-def create_default_registry(workspace_root: str | Path, *, is_plan_mode: bool = False) -> ToolRegistry:
-    return ToolRegistry(workspace_root=workspace_root, is_plan_mode=is_plan_mode)
+def create_default_registry(
+    workspace_root: str | Path,
+    *,
+    is_plan_mode: bool = False,
+    subagent_enabled: bool = False,
+) -> ToolRegistry:
+    return ToolRegistry(
+        workspace_root=workspace_root,
+        is_plan_mode=is_plan_mode,
+        subagent_enabled=subagent_enabled,
+    )

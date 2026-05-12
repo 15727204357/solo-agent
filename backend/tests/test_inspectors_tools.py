@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -376,3 +377,67 @@ def test_select_relevant_skills_prioritizes_behavior_skills_over_workflow_ties(t
     assert selected["ok"] is True
     assert selected["result"]["skills"][0]["name"] == "iron-law"
     assert selected["result"]["skills"][0]["category"] == "behavior"
+
+
+def test_task_tool_validates_arguments_and_returns_failed_result(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+
+    result = registry.call("task", {"description": "", "prompt": "inspect"})
+
+    assert result["ok"] is True
+    assert result["result"]["status"] == "failed"
+    assert "description" in result["result"]["error"]
+
+
+def test_task_tool_rejects_read_path_escape(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+
+    result = registry.call(
+        "task",
+        {
+            "description": "escape",
+            "prompt": "inspect outside",
+            "read_paths": ["../outside.txt"],
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "tool_error"
+
+
+def test_task_tool_returns_json_serializable_completed_result(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+
+    result = registry.call(
+        "task",
+        {
+            "description": "Inspect app",
+            "prompt": "Find run implementation details.",
+            "read_paths": ["app.py"],
+            "thread_id": "thread-1",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["status"] == "completed"
+    assert result["result"]["task_id"].startswith("task_")
+    assert result["result"]["evidence"]
+    json.dumps(result["result"])
+
+
+def test_task_tool_returns_failed_result_for_missing_path(tmp_path: Path) -> None:
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+
+    result = registry.call(
+        "task",
+        {
+            "description": "Inspect missing",
+            "prompt": "Read missing file.",
+            "read_paths": ["missing.py"],
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["status"] == "failed"
+    assert "does not exist" in result["result"]["error"]

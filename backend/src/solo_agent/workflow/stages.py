@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -16,6 +17,7 @@ from solo_agent.agent.prompts import (
     RESPONDER_SYSTEM_PROMPT,
     build_memory_context_block,
     build_skill_context_block,
+    build_subagent_tool_instruction,
     patch_user_prompt,
     planner_user_prompt,
     responder_user_prompt,
@@ -392,6 +394,10 @@ async def _select_tools_node(
     settings: AgentSettings | Mapping[str, Any],
 ) -> AsyncIterator[AgentEvent]:
     state.loop_stage = "select_tools"
+    available_tools = await _available_tool_names(deps.tool_registry) if deps.tool_registry is not None else set()
+    subagent_instruction = build_subagent_tool_instruction(state, task_tool_available="task" in available_tools)
+    if subagent_instruction:
+        state.snapshots["subagent_tool_instruction"] = subagent_instruction
     proposed = await _propose_tool_calls(deps.tool_registry, state, settings)
     state.snapshots["proposed_tool_calls"] = proposed
 
@@ -437,7 +443,10 @@ async def _select_tools_node(
         "tool_selection_completed",
         "select_tools",
         "Tool selection completed",
-        {"proposed_tool_calls": proposed},
+        {
+            "proposed_tool_calls": proposed,
+            "subagent_tool_instruction": subagent_instruction,
+        },
     )
 
 
@@ -512,6 +521,11 @@ async def _execute_tools_node(
         arguments = dict(call.get("arguments") or {})
         if name == "write_todos" and state.is_plan_mode and not arguments.get("thread_id"):
             arguments["thread_id"] = state.session_id
+        if name == "task":
+            if not arguments.get("thread_id"):
+                arguments["thread_id"] = state.session_id
+            if not arguments.get("task_id"):
+                arguments["task_id"] = _stable_subagent_task_id(arguments, state.session_id)
         attempted += 1
         yield _event(
             state,
@@ -613,6 +627,17 @@ async def _execute_tools_node(
             continue
         approved.append(call)
 
+        if name == "task":
+            dispatch = _task_dispatch_from_arguments(arguments)
+            state.subagent_dispatches.append(dispatch)
+            yield _event(
+                state,
+                "task_started",
+                "execute_tools",
+                f"Subagent task started: {dispatch['description']}",
+                dispatch,
+            )
+
         yield _event(
             state,
             "tool_progress",
@@ -624,6 +649,19 @@ async def _execute_tools_node(
         try:
             raw_result = await _call_tool(deps.tool_registry, name, arguments)
         except Exception as exc:
+            if name == "task":
+                yield _event(
+                    state,
+                    "task_failed",
+                    "execute_tools",
+                    f"Subagent task failed: {exc}",
+                    {
+                        "task_id": arguments.get("task_id", ""),
+                        "description": arguments.get("description", ""),
+                        "subagent_type": arguments.get("subagent_type", "general-purpose"),
+                        "error": str(exc),
+                    },
+                )
             classification = _BEHAVIOR_POLICY.classify_error(
                 exc,
                 stage="tools",
@@ -703,6 +741,52 @@ async def _execute_tools_node(
             f"Tool {name} completed",
             {"name": name, "result": result, "metadata": output_metadata},
         )
+        if name == "task":
+            task_result = _extract_subagent_task_result(raw_result)
+            task_id = str(task_result.get("task_id") or arguments.get("task_id") or "")
+            if not task_result:
+                task_result = {
+                    "task_id": task_id,
+                    "subagent_type": arguments.get("subagent_type", "general-purpose"),
+                    "description": arguments.get("description", ""),
+                    "status": "failed",
+                    "result": "",
+                    "evidence": [],
+                    "read_paths": arguments.get("read_paths", []),
+                    "metadata": {},
+                    "error": _tool_error_message(raw_result),
+                }
+            state.subagent_results[task_id or f"task_{len(state.subagent_results) + 1}"] = task_result
+            state.snapshots["subagent_results"] = state.subagent_results
+            task_status = str(task_result.get("status") or ("completed" if raw_result_ok else "failed"))
+            if raw_result_ok and task_status != "failed":
+                yield _event(
+                    state,
+                    "task_completed",
+                    "execute_tools",
+                    f"Subagent task completed: {task_result.get('description') or arguments.get('description', '')}",
+                    {
+                        "task_id": task_result.get("task_id", task_id),
+                        "description": task_result.get("description", arguments.get("description", "")),
+                        "subagent_type": task_result.get("subagent_type", arguments.get("subagent_type", "general-purpose")),
+                        "status": task_status,
+                        "result": _task_result_summary(task_result.get("result", "")),
+                    },
+                )
+            else:
+                yield _event(
+                    state,
+                    "task_failed",
+                    "execute_tools",
+                    f"Subagent task failed: {task_result.get('description') or arguments.get('description', '')}",
+                    {
+                        "task_id": task_result.get("task_id", task_id),
+                        "description": task_result.get("description", arguments.get("description", "")),
+                        "subagent_type": task_result.get("subagent_type", arguments.get("subagent_type", "general-purpose")),
+                        "status": task_status,
+                        "error": task_result.get("error") or _tool_error_message(raw_result),
+                    },
+                )
         if raw_result_ok:
             _BEHAVIOR_POLICY.record_tool_success(protocol_state, name, arguments, raw_result)
         if name == "write_todos" and raw_result_ok:
@@ -1003,20 +1087,42 @@ async def _parallelism_gate_stage(
         tasks,
         max_parallel=int(_setting(settings, "max_concurrent_subagents", 3)),
     )
+    subagent_enabled = bool(_setting(settings, "subagent_enabled", False))
+    suitable = bool(decision.allowed)
+    strategy = "parallel" if suitable and subagent_enabled else "serial"
+    reason = decision.reason
+    if suitable and not subagent_enabled:
+        reason = "subagent_disabled"
+    decision_payload = {
+        **decision.to_dict(),
+        "strategy": strategy,
+        "suitable": suitable,
+        "reason": reason,
+        "task_count": len(tasks),
+        "candidates": [task.to_dict() for task in tasks],
+        "subagent_enabled": subagent_enabled,
+    }
 
     state.task_candidates = [task.to_dict() for task in tasks]
-    state.parallelism_decision = decision.to_dict()
-    state.execution_strategy = decision.mode
+    state.parallelism_decision = decision_payload
+    state.execution_strategy = strategy
     state.snapshots["task_candidates"] = state.task_candidates
     state.snapshots["parallelism_decision"] = state.parallelism_decision
     state.snapshots["execution_strategy"] = state.execution_strategy
 
     yield _event(
         state,
+        "parallelism_decision_completed",
+        "parallelism_gate",
+        f"Parallelism decision: {strategy}",
+        decision_payload,
+    )
+    yield _event(
+        state,
         "parallelism_gate_completed",
         "parallelism_gate",
-        f"Parallelism decision: {decision.mode}",
-        decision.to_dict(),
+        f"Parallelism decision: {strategy}",
+        decision_payload,
     )
 
 
@@ -1203,6 +1309,45 @@ async def _propose_tool_calls(
     elif "list_skills" in available and _mentions_skill(task_lc, plan_lc):
         calls.append({"name": "list_skills", "arguments": {}, "category": "skill"})
 
+    decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
+    subagent_enabled = bool(decision.get("subagent_enabled", False))
+    suitable_for_task = bool(decision.get("suitable", decision.get("allowed", False)))
+    candidates = decision.get("candidates") or decision.get("tasks") or []
+    if "task" in available and subagent_enabled and suitable_for_task and len(candidates) >= 2:
+        remaining = max(0, max_calls - len(calls))
+        for candidate in candidates[:remaining]:
+            if not isinstance(candidate, Mapping):
+                continue
+            description = str(candidate.get("title") or candidate.get("description") or candidate.get("id") or "Subtask")
+            read_paths = [
+                str(path)
+                for path in [
+                    *(candidate.get("read_paths") or []),
+                    *(candidate.get("write_paths") or []),
+                ]
+                if str(path).strip()
+            ]
+            prompt_parts = [
+                f"Subtask: {description}",
+                f"Parent user task: {state.user_input}",
+                f"Parent plan: {state.plan or '(no plan)'}",
+                f"Candidate metadata: {candidate}",
+                "Return concise structured findings and evidence for the main agent to synthesize. Do not edit files.",
+            ]
+            calls.append(
+                {
+                    "name": "task",
+                    "arguments": {
+                        "description": description,
+                        "prompt": "\n\n".join(prompt_parts),
+                        "subagent_type": str(candidate.get("subagent_type") or "general-purpose"),
+                        "read_paths": read_paths,
+                        "allowed_tools": ["workspace_snapshot", "list_files", "read_file", "search_text"],
+                    },
+                    "category": "subagent",
+                }
+            )
+
     if "workspace_snapshot" in available:
         calls.append(
             {
@@ -1296,6 +1441,51 @@ def _extract_tool_result(value: Any) -> dict[str, Any]:
         return {}
     result = value.get("result", value)
     return dict(result) if isinstance(result, Mapping) else {}
+
+
+def _extract_subagent_task_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    result = value.get("result", value)
+    return dict(result) if isinstance(result, Mapping) else {}
+
+
+def _stable_subagent_task_id(arguments: Mapping[str, Any], session_id: str) -> str:
+    payload = json.dumps(
+        {
+            "thread_id": session_id,
+            "description": arguments.get("description", ""),
+            "prompt": arguments.get("prompt", ""),
+            "subagent_type": arguments.get("subagent_type", "general-purpose"),
+            "read_paths": arguments.get("read_paths", []),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return f"task_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _task_dispatch_from_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": str(arguments.get("task_id", "")),
+        "description": str(arguments.get("description", "")),
+        "subagent_type": str(arguments.get("subagent_type") or "general-purpose"),
+        "read_paths": list(arguments.get("read_paths") or []),
+        "allowed_tools": list(arguments.get("allowed_tools") or []),
+        "timeout_seconds": arguments.get("timeout_seconds"),
+    }
+
+
+def _task_result_summary(value: Any, *, max_chars: int = 500) -> str:
+    text = value if isinstance(value, str) else _serialize_tool_result(value)
+    return text if len(text) <= max_chars else text[:max_chars] + "\n...[truncated]"
+
+
+def _tool_error_message(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get("error") or value.get("message") or value.get("code") or "tool call failed")
+    return "tool call failed"
 
 
 async def _inspect(inspector: Any | None, phase: str, payload: dict[str, Any]) -> dict[str, Any]:

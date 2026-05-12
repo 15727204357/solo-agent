@@ -78,3 +78,59 @@ async def test_write_todos_updates_task_list_and_emits_event(tmp_path) -> None:
     assert "task_list_updated" in [event.type for event in events]
     assert state.task_list["tasks"][1]["status"] == "in_progress"
     assert [item.status for item in restored.items] == ["completed", "in_progress"]
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_runs_task_tool_and_updates_subagent_state(tmp_path) -> None:
+    (tmp_path / "app.py").write_text("def service():\n    return 'ok'\n", encoding="utf-8")
+    settings = AgentSettings(workspace_root=tmp_path, subagent_enabled=True)
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+    state = AgentState(session_id="s-subagent", run_id="r1", user_input="inspect app")
+    state.snapshots["proposed_tool_calls"] = [
+        {
+            "name": "task",
+            "arguments": {
+                "description": "Inspect app",
+                "prompt": "Inspect app.py and summarize service.",
+                "read_paths": ["app.py"],
+            },
+        }
+    ]
+    deps = AgentDeps(tool_registry=registry, safety_inspector=registry, settings=settings)
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    event_types = [event.type for event in events]
+    result = next(iter(state.subagent_results.values()))
+
+    assert "task_started" in event_types
+    assert "task_completed" in event_types
+    assert state.subagent_dispatches[0]["task_id"].startswith("task_")
+    assert result["metadata"]["thread_id"] == "s-subagent"
+    assert result["status"] == "completed"
+    assert state.snapshots["subagent_results"] == state.subagent_results
+    assert any(item["source"] == "tool:task" for item in state.context)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_emits_task_failed_for_failed_task_result(tmp_path) -> None:
+    settings = AgentSettings(workspace_root=tmp_path, subagent_enabled=True)
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+    state = AgentState(session_id="s-subagent", run_id="r2", user_input="inspect missing")
+    state.snapshots["proposed_tool_calls"] = [
+        {
+            "name": "task",
+            "arguments": {
+                "description": "Inspect missing",
+                "prompt": "Inspect missing file.",
+                "read_paths": ["missing.py"],
+            },
+        }
+    ]
+    deps = AgentDeps(tool_registry=registry, safety_inspector=registry, settings=settings)
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    failed = next(event for event in events if event.type == "task_failed")
+    result = next(iter(state.subagent_results.values()))
+
+    assert result["status"] == "failed"
+    assert "does not exist" in failed.data["error"]

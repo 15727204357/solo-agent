@@ -336,6 +336,47 @@ def responder_user_prompt(state: AgentState) -> str:
     )
 
 
+def build_subagent_tool_instruction(state: AgentState, *, task_tool_available: bool = False) -> str:
+    decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
+    subagent_enabled = bool(decision.get("subagent_enabled", False))
+    suitable = bool(decision.get("suitable", decision.get("allowed", False)))
+    candidates = decision.get("candidates") or decision.get("tasks") or []
+    if not subagent_enabled or not task_tool_available:
+        return ""
+
+    lines = [
+        "## Subagent Tool Strategy",
+        f"parallelism_decision: strategy={decision.get('strategy') or decision.get('mode') or 'serial'}, "
+        f"suitable={suitable}, reason={decision.get('reason') or ''}, "
+        f"task_count={decision.get('task_count') or len(candidates)}",
+    ]
+    if candidates:
+        lines.append("Candidate subtasks:")
+        for item in candidates[:5]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- {item.get('id') or item.get('task_id')}: {item.get('title') or item.get('description') or 'subtask'} "
+                f"(read_paths={item.get('read_paths') or []})"
+            )
+    if suitable:
+        lines.append(
+            "The task tool is available. Use it only for complex work that is clearly decomposable into "
+            "independent subtasks with scoped context. Do not call task for simple work, for a single subtask, "
+            "or when the result would not be useful to synthesize in the main agent."
+        )
+        lines.append(
+            "Every task prompt must be self-contained, include only necessary context, and ask the subagent "
+            "to return structured findings for the main agent to synthesize."
+        )
+    else:
+        lines.append(
+            "The task tool is available, but the current decision says parallelism is not suitable. "
+            "Usually do not call task unless a later tool-selection signal proves a clearly scoped independent subtask."
+        )
+    return "\n".join(lines)
+
+
 def _format_runtime_task_list(state: AgentState) -> str:
     if not state.is_plan_mode or not state.task_list:
         return ""

@@ -128,6 +128,27 @@ def test_write_todos_is_plan_mode_only_and_persists_by_thread(tmp_path: Path) ->
     assert [item.subject for item in restored.items] == ["Inspect workflow", "Wire write_todos"]
 
 
+def test_write_todos_and_task_tool_are_independently_gated(tmp_path: Path) -> None:
+    agent_registry = create_default_registry(tmp_path, is_plan_mode=False, subagent_enabled=False)
+    plan_registry = create_default_registry(tmp_path, is_plan_mode=True, subagent_enabled=False)
+    subagent_registry = create_default_registry(tmp_path, is_plan_mode=False, subagent_enabled=True)
+    combined_registry = create_default_registry(tmp_path, is_plan_mode=True, subagent_enabled=True)
+
+    agent_names = {tool["name"] for tool in agent_registry.list_tools()}
+    plan_names = {tool["name"] for tool in plan_registry.list_tools()}
+    subagent_names = {tool["name"] for tool in subagent_registry.list_tools()}
+    combined_names = {tool["name"] for tool in combined_registry.list_tools()}
+
+    assert "write_todos" not in agent_names
+    assert "task" not in agent_names
+    assert "write_todos" in plan_names
+    assert "task" not in plan_names
+    assert "write_todos" not in subagent_names
+    assert "task" in subagent_names
+    assert "write_todos" in combined_names
+    assert "task" in combined_names
+
+
 def test_write_todos_merge_deduplicates_by_normalized_subject(tmp_path: Path) -> None:
     store = WorkspaceTaskStore(tmp_path)
     store.create_task("thread-1", subject="Inspect workflow graph", status="pending")

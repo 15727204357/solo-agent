@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
@@ -29,12 +29,9 @@ from solo_agent.workflow.graph_nodes import (
     make_skill_context_node,
     make_skip_memory_node,
     make_spec_compliance_review_node,
-    make_subagent_dispatch_node,
     make_subdirectory_hint_node,
-    make_supervisor_review_node,
     make_sync_memory_node,
     make_task_state_node,
-    make_wait_subagents_node,
 )
 from solo_agent.workflow.graph_state import SoloGraphState
 
@@ -73,14 +70,6 @@ def _memory_enabled_route(state: SoloGraphState) -> str:
 
 
 
-def _execution_strategy_route(state: SoloGraphState) -> str:
-    agent_data = state.get("agent_state") or {}
-    strategy = agent_data.get("execution_strategy", "serial")
-    if strategy == "parallel":
-        return "parallel_dispatch"
-    return "collect_context"
-
-
 def _patch_route(state: SoloGraphState) -> str:
     agent_data = state.get("agent_state") or {}
     patch = agent_data.get("patch_proposal")
@@ -89,19 +78,6 @@ def _patch_route(state: SoloGraphState) -> str:
     if agent_data.get("awaiting_approval", False):
         return END
     return "propose_verified_patch"
-
-
-def _supervisor_route(state: SoloGraphState) -> str:
-    agent_data = state.get("agent_state") or {}
-    report = agent_data.get("supervisor_report") or {}
-    decision = report.get("decision", "continue_parallel_summary")
-    if decision == "need_main_execution":
-        return "collect_context"
-    if decision == "fallback_serial":
-        return "collect_context"
-    if decision == "blocked":
-        return END
-    return "context_guard_before_respond"
 
 
 def _recovery_route(state: SoloGraphState) -> str:
@@ -117,7 +93,7 @@ def _recovery_route(state: SoloGraphState) -> str:
 
 
 # ---------------------------------------------------------------------------
-# build_main_workflow_graph — the Single Graph
+# build_main_workflow_graph 鈥?the Single Graph
 # ---------------------------------------------------------------------------
 
 def build_main_workflow_graph(
@@ -128,13 +104,14 @@ def build_main_workflow_graph(
 ) -> StateGraph:
     """Build the complete LangGraph StateGraph for the Solo Agent workflow.
 
-    This is the SOLE orchestration graph covering all execution modes in a
-    single unified topology:
+    This is the sole orchestration graph covering all execution modes in a
+    single unified topology. Subagents are exposed as the ordinary ``task``
+    tool when enabled; they are not a graph path and are never auto-dispatched
+    by ``parallelism_gate``.
       - plan capability mode: same execution graph, stronger planning prompt
-      - agent serial (plan → context → inspect → tools → review → respond)
-      - agent parallel (plan → gate → dispatch → subagents → supervisor → respond)
-      - verified editing (propose → await approval → apply → verify → review)
-      - error recovery (classify → recover/block)
+      - agent workflow: plan -> gate -> context -> inspect -> tools -> review -> respond
+      - verified editing (propose 鈫?await approval 鈫?apply 鈫?verify 鈫?review)
+      - error recovery (classify 鈫?recover/block)
       - memory prelude/postlude
       - checkpoint persistence
     """
@@ -166,13 +143,6 @@ def build_main_workflow_graph(
     graph.add_node("inspect", make_inspect_node(deps))
     graph.add_node("select_tools", make_select_tools_node(deps, settings))
     graph.add_node("execute_tools", make_execute_tools_node(deps, settings))
-
-    # -----------------------------------------------------------------------
-    # Agent parallel path (real dispatch, not placeholder)
-    # -----------------------------------------------------------------------
-    graph.add_node("parallel_dispatch", make_subagent_dispatch_node(deps, settings))
-    graph.add_node("wait_subagents", make_wait_subagents_node(settings))
-    graph.add_node("supervisor_review", make_supervisor_review_node(provider, settings))
 
     # -----------------------------------------------------------------------
     # Verified editing
@@ -242,14 +212,7 @@ def build_main_workflow_graph(
     )
     graph.add_edge("task_state", "parallelism_gate")
 
-    graph.add_conditional_edges(
-        "parallelism_gate",
-        _execution_strategy_route,
-        {
-            "parallel_dispatch": "parallel_dispatch",
-            "collect_context": "collect_context",
-        },
-    )
+    graph.add_edge("parallelism_gate", "collect_context")
 
     # Serial path
     graph.add_edge("collect_context", "inspect")
@@ -279,27 +242,6 @@ def build_main_workflow_graph(
         },
     )
 
-    # Parallel path
-    graph.add_conditional_edges(
-        "parallel_dispatch",
-        lambda s: _error_aware_route(s, "wait_subagents"),
-        {"wait_subagents": "wait_subagents", "classify_error": "classify_error"},
-    )
-    graph.add_conditional_edges(
-        "wait_subagents",
-        lambda s: _error_aware_route(s, "supervisor_review"),
-        {"supervisor_review": "supervisor_review", "classify_error": "classify_error"},
-    )
-    graph.add_conditional_edges(
-        "supervisor_review",
-        _supervisor_route,
-        {
-            "context_guard_before_respond": "context_guard_before_respond",
-            "collect_context": "collect_context",
-            END: END,
-        },
-    )
-
     # Respond path
     graph.add_edge("subdirectory_hint", "context_guard_before_respond")
     graph.add_conditional_edges(
@@ -314,7 +256,7 @@ def build_main_workflow_graph(
         {"sync_memory": "sync_memory", "classify_error": "classify_error"},
     )
 
-    # Error edges from execution nodes — catch exceptions and route to classify_error
+    # Error edges from execution nodes 鈥?catch exceptions and route to classify_error
 
     # Postlude with memory conditional
     graph.add_conditional_edges(
@@ -381,14 +323,10 @@ def route_after_execute_tools(state: SoloGraphState) -> str:
 def route_after_parallelism_gate(state: SoloGraphState) -> str:
     if _is_blocked(state):
         return END
-    agent_data = state.get("agent_state") or {}
-    strategy = agent_data.get("execution_strategy", "serial")
-    return "parallel_dispatch" if strategy == "parallel" else "collect_context"
+    return "collect_context"
 
 
 def route_after_patch(state: SoloGraphState) -> str:
     if _is_awaiting_approval(state):
         return END
     return "subdirectory_hint"
-
-

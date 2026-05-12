@@ -38,7 +38,7 @@ class AgentRunner:
             )
             run_mode = str(run.metadata.get("run_mode", "agent"))
             is_plan_mode = run_mode == "plan"
-            subagent_enabled = False
+            subagent_enabled = bool(run.metadata.get("subagent_enabled", settings.subagent_enabled))
             agent_settings = AgentSettings(
                 provider=settings.provider,
                 workspace_root=settings.workspace_root,
@@ -80,7 +80,11 @@ class AgentRunner:
                 workflow_runtime_root=settings.workflow_runtime_root,
             )
             try:
-                registry = create_default_registry(settings.workspace_root, is_plan_mode=is_plan_mode)
+                registry = create_default_registry(
+                    settings.workspace_root,
+                    is_plan_mode=is_plan_mode,
+                    subagent_enabled=subagent_enabled,
+                )
             except TypeError:
                 registry = create_default_registry(settings.workspace_root)
             provider = create_provider_from_settings(agent_settings)

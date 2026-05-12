@@ -118,6 +118,9 @@ const stageByEvent = {
   inspect_completed: "inspect",
   tool_call_started: "tool",
   tool_call_completed: "tool",
+  task_started: "tool",
+  task_completed: "tool",
+  task_failed: "tool",
   response_started: "response",
   response_delta: "response",
   response_completed: "response",
@@ -136,6 +139,8 @@ const completedEvents = new Set([
   "context_completed",
   "inspect_completed",
   "tool_call_completed",
+  "task_completed",
+  "task_failed",
   "response_completed",
   "persist_completed",
   "persist_snapshot_completed",
@@ -833,6 +838,17 @@ function compactPayload(event) {
       name: data.name,
       arguments: data.arguments,
       ok: data.result?.ok,
+    });
+  }
+  if (taskEventNames.includes(event.type)) {
+    return prettyJson({
+      task_id: data.task_id,
+      subagent_type: data.subagent_type,
+      status: data.status,
+      result: typeof data.result === "string" && data.result.length > 500
+        ? `${data.result.slice(0, 500)}\n...[truncated]`
+        : data.result,
+      error: data.error,
     });
   }
   if (Object.keys(data).length) {

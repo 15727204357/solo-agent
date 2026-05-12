@@ -99,7 +99,7 @@ async def test_route_after_parallelism_gate_blocked_returns_end() -> None:
 @pytest.mark.asyncio
 async def test_route_after_parallelism_gate_parallel() -> None:
     state: SoloGraphState = {"agent_state": {"execution_strategy": "parallel", "blocked": False}, "events": [], "error": None}
-    assert route_after_parallelism_gate(state) == "parallel_dispatch"
+    assert route_after_parallelism_gate(state) == "collect_context"
 
 
 @pytest.mark.asyncio
@@ -177,3 +177,13 @@ async def test_graph_uses_single_main_plan_path() -> None:
     assert "load_task_state" in node_names
     assert "task_state" in node_names
     assert "plan_response" not in node_names
+
+
+@pytest.mark.asyncio
+async def test_graph_does_not_register_graph_level_subagent_nodes() -> None:
+    graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
+    node_names = set(graph.nodes.keys())
+
+    assert "parallel_dispatch" not in node_names
+    assert "wait_subagents" not in node_names
+    assert "supervisor_review" not in node_names
