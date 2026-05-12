@@ -347,70 +347,6 @@ class ToolRegistry:
                 },
             )
         )
-        self.register(
-            ToolSpec(
-                name="task_create",
-                description="Create a structured TaskList item for a LangGraph thread.",
-                read_only=False,
-                handler=self._workspace_tools.task_create,
-                category="task",
-                risk_level="low",
-                parameters={
-                    "thread_id": "Current LangGraph thread/session id.",
-                    "subject": "Imperative task subject.",
-                    "description": "Optional task details.",
-                    "status": "pending, in_progress, completed, blocked, or deleted.",
-                    "active_form": "Present-continuous form for resume prompts.",
-                    "blocked_by": "Optional blocking task ids or reasons.",
-                    "blocks": "Optional task ids this task blocks.",
-                },
-            )
-        )
-        self.register(
-            ToolSpec(
-                name="task_get",
-                description="Get a structured TaskList item by id.",
-                read_only=True,
-                handler=self._workspace_tools.task_get,
-                category="task",
-                risk_level="low",
-                parameters={"thread_id": "Current LangGraph thread/session id.", "task_id": "Task id."},
-            )
-        )
-        self.register(
-            ToolSpec(
-                name="task_list",
-                description="List structured TaskList items for a LangGraph thread.",
-                read_only=True,
-                handler=self._workspace_tools.task_list,
-                category="task",
-                risk_level="low",
-                parameters={
-                    "thread_id": "Current LangGraph thread/session id.",
-                    "include_deleted": "Whether deleted tasks should be returned.",
-                },
-            )
-        )
-        self.register(
-            ToolSpec(
-                name="task_update",
-                description="Update a structured TaskList item.",
-                read_only=False,
-                handler=self._workspace_tools.task_update,
-                category="task",
-                risk_level="low",
-                parameters={
-                    "thread_id": "Current LangGraph thread/session id.",
-                    "task_id": "Task id.",
-                    "subject": "Optional replacement subject.",
-                    "description": "Optional replacement description.",
-                    "status": "Optional status update.",
-                    "active_form": "Optional resume wording.",
-                    "blocked_by": "Optional blockers.",
-                    "blocks": "Optional task ids this task blocks.",
-                },
-            )
-        )
         if self.is_plan_mode:
             self.register(
                 ToolSpec(
@@ -432,9 +368,6 @@ class ToolRegistry:
                     },
                 )
             )
-        else:
-            for name in ("task_create", "task_get", "task_list", "task_update"):
-                self._tools.pop(name, None)
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [

@@ -880,20 +880,6 @@ function applyRunEvent(event) {
     renderThread();
   }
 
-
-  if (event.type === "plan_self_review_completed") {
-    const reviewData = data.plan_quality_report || data;
-    const passed = reviewData.passed !== false;
-    const badge = document.createElement("span");
-    badge.className = `quality-badge ${passed ? "quality-pass" : "quality-fail"}`;
-    badge.textContent = passed ? "通过" : "有问题";
-    dom.planSummary.prepend(badge);
-    if (state.activeAssistantMessage) {
-      state.activeAssistantMessage.meta = passed ? "自检通过" : "自检发现问题";
-      renderThread();
-    }
-  }
-
   if (event.type === "response_started" && !state.activeAssistantMessage) {
     state.activeAssistantMessage = createMessage("assistant", "", "流式输出");
     state.threadMessages.push(state.activeAssistantMessage);

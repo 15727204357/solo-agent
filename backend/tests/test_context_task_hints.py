@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from solo_agent.context import SubdirectoryHintTracker, TaskListState, WorkspaceTaskStore
-from solo_agent.tools import create_default_registry
+from solo_agent.tools import WorkspaceTools, create_default_registry
+
+LEGACY_TASK_TOOL_NAMES = {"task_create", "task_get", "task_list", "task_update"}
 
 
 def test_task_state_extracts_and_formats_continue_from() -> None:
@@ -86,28 +88,28 @@ def test_workspace_task_store_roundtrip(tmp_path: Path) -> None:
     assert listed["tasks"][0]["subject"] == "Implement task tools"
 
 
-def test_task_tools_are_registered_and_workspace_bounded(tmp_path: Path) -> None:
-    registry = create_default_registry(tmp_path, is_plan_mode=True)
+def test_workspace_task_methods_remain_available_internally(tmp_path: Path) -> None:
+    tools = WorkspaceTools(tmp_path)
 
-    created = registry.call(
-        "task_create",
-        {"thread_id": "thread-1", "subject": "Expose TaskList tools", "status": "in_progress"},
-    )
-    task_id = created["result"]["task"]["id"]
-    updated = registry.call("task_update", {"thread_id": "thread-1", "task_id": task_id, "status": "completed"})
-    listed = registry.call("task_list", {"thread_id": "thread-1"})
+    created = tools.task_create("thread-1", subject="Expose TaskList tools", status="in_progress")
+    task_id = created["task"]["id"]
+    updated = tools.task_update("thread-1", task_id, status="completed")
+    listed = tools.task_list("thread-1")
 
-    assert created["ok"] is True
-    assert updated["result"]["task"]["status"] == "completed"
-    assert listed["result"]["tasks"][0]["id"] == task_id
+    assert updated["task"]["status"] == "completed"
+    assert listed["tasks"][0]["id"] == task_id
 
 
 def test_write_todos_is_plan_mode_only_and_persists_by_thread(tmp_path: Path) -> None:
     agent_registry = create_default_registry(tmp_path, is_plan_mode=False)
     plan_registry = create_default_registry(tmp_path, is_plan_mode=True)
+    agent_tool_names = {tool["name"] for tool in agent_registry.list_tools()}
+    plan_tool_names = {tool["name"] for tool in plan_registry.list_tools()}
 
-    assert "write_todos" not in {tool["name"] for tool in agent_registry.list_tools()}
-    assert "write_todos" in {tool["name"] for tool in plan_registry.list_tools()}
+    assert "write_todos" not in agent_tool_names
+    assert not LEGACY_TASK_TOOL_NAMES & agent_tool_names
+    assert "write_todos" in plan_tool_names
+    assert not LEGACY_TASK_TOOL_NAMES & plan_tool_names
 
     updated = plan_registry.call(
         "write_todos",
@@ -124,6 +126,48 @@ def test_write_todos_is_plan_mode_only_and_persists_by_thread(tmp_path: Path) ->
     assert updated["ok"] is True
     assert updated["result"]["tasks"][1]["status"] == "in_progress"
     assert [item.subject for item in restored.items] == ["Inspect workflow", "Wire write_todos"]
+
+
+def test_write_todos_merge_deduplicates_by_normalized_subject(tmp_path: Path) -> None:
+    store = WorkspaceTaskStore(tmp_path)
+    store.create_task("thread-1", subject="Inspect workflow graph", status="pending")
+    tools = WorkspaceTools(tmp_path)
+
+    state = tools.write_todos(
+        [
+            {
+                "subject": " inspect   workflow graph ",
+                "description": "Updated by write_todos",
+                "status": "in_progress",
+            }
+        ],
+        thread_id="thread-1",
+        merge=True,
+    )
+    restored = WorkspaceTaskStore(tmp_path).load("thread-1")
+
+    assert len(state["tasks"]) == 1
+    assert len(restored.items) == 1
+    assert restored.items[0].subject == "inspect workflow graph"
+    assert restored.items[0].description == "Updated by write_todos"
+    assert restored.items[0].status == "in_progress"
+    assert len([item for item in restored.items if item.status == "in_progress"]) <= 1
+
+
+def test_write_todos_replace_ignores_merge_deduplication(tmp_path: Path) -> None:
+    store = WorkspaceTaskStore(tmp_path)
+    store.create_task("thread-1", subject="Inspect workflow graph", status="in_progress")
+    tools = WorkspaceTools(tmp_path)
+
+    state = tools.write_todos(
+        [{"subject": "Replacement task", "status": "in_progress"}],
+        thread_id="thread-1",
+        merge=False,
+    )
+    restored = WorkspaceTaskStore(tmp_path).load("thread-1")
+
+    assert len(state["tasks"]) == 1
+    assert [item.subject for item in restored.items] == ["Replacement task"]
 
 
 def test_subdirectory_hints_load_once_per_directory(tmp_path: Path) -> None:

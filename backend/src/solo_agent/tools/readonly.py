@@ -631,6 +631,18 @@ class WorkspaceTools:
             for item in incoming.items:
                 existing = state.get(item.id)
                 if existing is None:
+                    subject_key = _normalize_task_subject(item.subject)
+                    existing = next(
+                        (
+                            current
+                            for current in state.items
+                            if current.status != "deleted"
+                            and subject_key
+                            and _normalize_task_subject(current.subject) == subject_key
+                        ),
+                        None,
+                    )
+                if existing is None:
                     state.items.append(item)
                     continue
                 existing.update(
@@ -1019,6 +1031,10 @@ def _is_test_path(path: Path, root: Path) -> bool:
     if "tests" in parts:
         return True
     return path.is_file() and path.suffix == ".py" and (path.name.startswith("test_") or path.name.endswith("_test.py"))
+
+
+def _normalize_task_subject(value: str) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
 
 
 def _sanitize_skill(text: str) -> str:
