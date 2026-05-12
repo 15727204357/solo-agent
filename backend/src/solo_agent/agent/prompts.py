@@ -305,16 +305,20 @@ def planner_user_prompt(
     conversation_context: dict[str, object] | None = None,
     memory_context_block: str = "",
     skill_context_block: str = "",
+    task_list_block: str = "",
+    plan_mode_enabled: bool = False,
 ) -> str:
-    return "\n\n".join(
-        [
-            memory_context_block or _format_conversation_context(conversation_context),
-            skill_context_block,
-            f"Current user task:\n{user_input}",
-            task_planner_instruction(),
-            "The current user task above is authoritative. Return only the plan.",
-        ]
-    )
+    parts = [
+        memory_context_block or _format_conversation_context(conversation_context),
+        skill_context_block,
+    ]
+    if task_list_block:
+        parts.append(task_list_block)
+    parts.append(f"Current user task:\n{user_input}")
+    if plan_mode_enabled:
+        parts.append(task_planner_instruction())
+    parts.append("The current user task above is authoritative. Return only the plan.")
+    return "\n\n".join(parts)
 
 
 def responder_user_prompt(state: AgentState) -> str:
@@ -323,12 +327,25 @@ def responder_user_prompt(state: AgentState) -> str:
             f"User task:\n{state.user_input}",
             state.memory_context_block or _format_conversation_context(state.conversation_context),
             state.skill_context_block,
+            _format_runtime_task_list(state),
             f"Plan:\n{state.plan or '(no plan produced)'}",
             f"Collected context:\n{state.context or '(no context available)'}",
             f"Tool calls:\n{[call.__dict__ for call in state.tool_calls] or '(no tool calls)'}",
             "Write the final response for the Web UI.",
         ]
     )
+
+
+def _format_runtime_task_list(state: AgentState) -> str:
+    if not state.is_plan_mode or not state.task_list:
+        return ""
+    try:
+        from solo_agent.context import TaskListState
+
+        task_state = TaskListState.from_payload(state.task_list, thread_id=state.session_id)
+        return task_state.format_block()
+    except Exception:
+        return ""
 
 
 def patch_user_prompt(state: AgentState) -> str:

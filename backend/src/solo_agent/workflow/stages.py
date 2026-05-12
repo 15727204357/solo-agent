@@ -21,7 +21,7 @@ from solo_agent.agent.prompts import (
     responder_user_prompt,
 )
 from solo_agent.agent.state import AgentState, ToolCallRecord
-from solo_agent.context import SubdirectoryHintTracker, TaskListState
+from solo_agent.context import SubdirectoryHintTracker, TaskListState, WorkspaceTaskStore
 from solo_agent.providers import ChatMessage, ChatProvider
 from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequest, build_patch_proposal, extract_patch_request
 from solo_agent.workflow.parallelism import evaluate_independence, extract_task_candidates_from_text
@@ -35,7 +35,7 @@ async def _receive_user_turn_stage(
 ) -> AsyncIterator[AgentEvent]:
     state.loop_stage = "receive_user_turn"
     state.run_mode = str(_setting(settings, "run_mode", "agent"))
-    state.is_plan_mode = bool(_setting(settings, "is_plan_mode", False))
+    state.is_plan_mode = state.run_mode == "plan" or bool(_setting(settings, "is_plan_mode", False))
     state.memory_enabled = bool(_setting(settings, "memory_enabled", True))
     state.conversation_history_enabled = bool(
         _setting(settings, "conversation_history_enabled", True)
@@ -96,6 +96,9 @@ async def _plan_node(
     The user enabled Plan mode. Before acting, create a clear, step-by-step execution plan.
     Use the plan to guide the rest of the run, but do not stop after planning.
     Prefer explicit phases, success criteria, risks, and verification steps.
+    For complex work, maintain the session TaskList with write_todos when task state changes.
+    Do not use write_todos for small one-step tasks where a task list would add noise.
+    Update task status after completing each meaningful step, and usually keep only one task in_progress.
     Keep the plan concise enough to execute.
     </plan_mode>
     """
@@ -108,6 +111,8 @@ async def _plan_node(
                 state.conversation_context,
                 state.memory_context_block,
                 state.skill_context_block,
+                _format_task_list_block(state) if plan_mode_enabled else "",
+                plan_mode_enabled=plan_mode_enabled,
             ),
         ),
     ]
@@ -505,6 +510,8 @@ async def _execute_tools_node(
 
         name = str(call.get("name", "unknown"))
         arguments = dict(call.get("arguments") or {})
+        if name == "write_todos" and state.is_plan_mode and not arguments.get("thread_id"):
+            arguments["thread_id"] = state.session_id
         attempted += 1
         yield _event(
             state,
@@ -698,6 +705,22 @@ async def _execute_tools_node(
         )
         if raw_result_ok:
             _BEHAVIOR_POLICY.record_tool_success(protocol_state, name, arguments, raw_result)
+        if name == "write_todos" and raw_result_ok:
+            task_state = TaskListState.from_payload(_extract_tool_result(raw_result), thread_id=state.session_id)
+            state.task_list = task_state.to_dict()
+            state.snapshots["task_list"] = state.task_list
+            state.snapshots["task_state"] = state.task_list
+            _replace_task_list_context(state, task_state)
+            yield _event(
+                state,
+                "task_list_updated",
+                "execute_tools",
+                "Updated Plan mode TaskList",
+                {
+                    **_task_list_event_payload(task_state),
+                    "thread_id": task_state.thread_id,
+                },
+            )
         if name == "apply_text_edit" and raw_result_ok:
             yield _event(
                 state,
@@ -972,7 +995,6 @@ async def _parallelism_gate_stage(
         for part in [
             state.user_input,
             state.plan,
-            state.deep_plan,
         ]
         if part
     )
@@ -998,21 +1020,38 @@ async def _parallelism_gate_stage(
     )
 
 
-async def _task_state_stage(state: AgentState) -> AsyncIterator[AgentEvent]:
-    task_state = TaskListState.from_text(state.plan, thread_id=state.session_id)
-    if not task_state.items:
+async def _task_state_stage(
+    state: AgentState,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    if not state.is_plan_mode:
         return
-    state.snapshots["task_state"] = _task_state_to_dict(task_state)
+
+    workspace_root = Path(_setting(settings, "workspace_root", Path.cwd()) or Path.cwd())
+    store = WorkspaceTaskStore(workspace_root)
+    task_state = store.load(state.session_id)
+    initialized_from_plan = False
+    if not task_state.items and state.plan.strip():
+        parsed = TaskListState.from_plan(state.plan, thread_id=state.session_id)
+        if parsed.items:
+            task_state = parsed
+            store.save(task_state)
+            initialized_from_plan = True
+
+    state.task_list = task_state.to_dict()
+    state.snapshots["task_list"] = state.task_list
+    state.snapshots["task_state"] = state.task_list
     state.snapshots["task_state_json_block"] = task_state.format_json_block()
+    _replace_task_list_context(state, task_state)
     yield _event(
         state,
-        "task_state_injected",
-        "context",
-        "Captured TaskList state from plan",
+        "task_list_loaded",
+        "task_state",
+        "Loaded Plan mode TaskList",
         {
-            "continue_from": task_state.continue_from,
-            "items": state.snapshots["task_state"]["items"],
+            **_task_list_event_payload(task_state),
             "thread_id": task_state.thread_id,
+            "initialized_from_plan": initialized_from_plan,
         },
     )
 
@@ -1077,6 +1116,34 @@ def _context_compression_payload(state: AgentState) -> dict[str, Any]:
 
 def _task_state_to_dict(task_state: TaskListState) -> dict[str, Any]:
     return task_state.to_dict()
+
+
+def _task_list_event_payload(task_state: TaskListState) -> dict[str, Any]:
+    tasks = [item.to_dict() for item in task_state.items]
+    active_task = next((item.to_dict() for item in task_state.items if item.status == "in_progress"), None)
+    return {
+        "task_count": len([item for item in task_state.items if item.status != "deleted"]),
+        "active_task": active_task,
+        "tasks": tasks,
+    }
+
+
+def _replace_task_list_context(state: AgentState, task_state: TaskListState) -> None:
+    state.context = [item for item in state.context if item.get("source") != "task_list"]
+    state.context.append(
+        {
+            "source": "task_list",
+            "content": task_state.format_block(),
+            "metadata": {"thread_id": task_state.thread_id, "task_count": len(task_state.active_items())},
+        }
+    )
+
+
+def _format_task_list_block(state: AgentState) -> str:
+    if not state.task_list:
+        return ""
+    task_state = TaskListState.from_payload(state.task_list, thread_id=state.session_id)
+    return task_state.format_block()
 
 
 def _task_state_from_snapshot(value: Any) -> TaskListState | None:
@@ -1651,10 +1718,7 @@ async def _provider_routing_stage(
     current_node = state.current_node or ""
 
     role_map: dict[str, str] = {
-        "deep_plan": "complete",
         "plan": "complete",
-        "plan_revision": "complete",
-        "plan_self_review": "complete",
         "respond": "complete",
         "spec_compliance_review": "fast",
         "code_quality_review": "complete",

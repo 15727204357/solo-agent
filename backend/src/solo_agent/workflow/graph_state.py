@@ -69,6 +69,7 @@ def _parse_common_fields(data: dict[str, Any]) -> dict[str, Any]:
         "selected_skills": list(data.get("selected_skills") or []),
         "skill_budget": dict(data.get("skill_budget") or {}),
         "behavior_policy": dict(data.get("behavior_policy") or {}),
+        "task_list": dict(data.get("task_list") or {}),
         "task_candidates": list(data.get("task_candidates") or []),
         "parallelism_decision": dict(data.get("parallelism_decision") or {}),
         "execution_strategy": str(data.get("execution_strategy", "serial")),

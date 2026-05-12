@@ -33,6 +33,7 @@ class AgentState:
     selected_skills: list[dict[str, Any]] = field(default_factory=list)
     skill_budget: dict[str, Any] = field(default_factory=dict)
     behavior_policy: dict[str, Any] = field(default_factory=dict)
+    task_list: dict[str, Any] = field(default_factory=dict)
     task_candidates: list[dict[str, Any]] = field(default_factory=list)
     parallelism_decision: dict[str, Any] = field(default_factory=dict)
     execution_strategy: str = "serial"
@@ -79,8 +80,6 @@ class AgentState:
             "memory_budget": self.memory_budget,
             "summary_status": self.summary_status,
             "plan": self.plan,
-            "deep_plan": self.deep_plan,
-            "plan_quality_report": self.plan_quality_report,
             "conversation_context": self.conversation_context,
             "memory_context_block": self.memory_context_block,
             "memory_warnings": self.memory_warnings,
@@ -88,6 +87,7 @@ class AgentState:
             "selected_skills": self.selected_skills,
             "skill_budget": self.skill_budget,
             "behavior_policy": self.behavior_policy,
+            "task_list": self.task_list,
             "task_candidates": self.task_candidates,
             "parallelism_decision": self.parallelism_decision,
             "execution_strategy": self.execution_strategy,
@@ -126,5 +126,3 @@ class AgentState:
             "current_node": self.current_node,
             "previous_node": self.previous_node,
         }
-
-

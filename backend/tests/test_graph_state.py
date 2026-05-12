@@ -40,12 +40,15 @@ async def test_execution_strategy_task_candidates_parallelism_decision_survive()
         session_id="s1",
         run_id="r1",
         user_input="do it",
+        task_list={"thread_id": "s1", "tasks": [{"id": "T-1", "subject": "Plan", "status": "in_progress"}]},
         task_candidates=[{"id": "T1", "title": "Task one"}],
         parallelism_decision={"allowed": True, "mode": "parallel", "reason": "All pass"},
         execution_strategy="parallel",
     )
     data = agent_state_to_graph_data(state)
     restored = agent_state_from_graph_data(data)
+    assert isinstance(data["task_list"], dict)
+    assert restored.task_list["tasks"][0]["subject"] == "Plan"
     assert restored.task_candidates == [{"id": "T1", "title": "Task one"}]
     assert restored.parallelism_decision == {"allowed": True, "mode": "parallel", "reason": "All pass"}
     assert restored.execution_strategy == "parallel"

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from solo_agent.context import WorkspaceTaskStore
+from solo_agent.context import TaskListState, WorkspaceTaskStore
 
 DEFAULT_EXCLUDES = {
     ".git",
@@ -611,6 +611,44 @@ class WorkspaceTools:
             blocks=blocks,
             metadata=metadata,
         )
+
+    def write_todos(
+        self,
+        tasks: list[dict[str, Any]],
+        *,
+        merge: bool = True,
+        thread_id: str = "",
+    ) -> dict[str, Any]:
+        if not thread_id:
+            raise ValueError("write_todos requires thread_id from the current run context")
+        if not isinstance(tasks, list):
+            raise ValueError("write_todos tasks must be a list")
+
+        store = WorkspaceTaskStore(self.workspace_root)
+        incoming = TaskListState.from_payload(tasks, thread_id=thread_id)
+        if merge:
+            state = store.load(thread_id)
+            for item in incoming.items:
+                existing = state.get(item.id)
+                if existing is None:
+                    state.items.append(item)
+                    continue
+                existing.update(
+                    subject=item.subject,
+                    description=item.description,
+                    status=item.status,
+                    active_form=item.active_form,
+                    blocked_by=item.blocked_by,
+                    blocks=item.blocks,
+                    metadata=item.metadata,
+                )
+        else:
+            state = incoming
+            state.thread_id = thread_id
+
+        state.ensure_single_active()
+        store.save(state)
+        return state.to_dict()
 
     def _build_updated_text(
         self,

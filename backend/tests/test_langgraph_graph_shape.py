@@ -168,9 +168,12 @@ async def test_graph_contains_error_recovery_nodes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_contains_plan_response_node() -> None:
+async def test_graph_uses_single_main_plan_path() -> None:
     graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
     compiled = graph.compile(checkpointer=False)
     assert compiled is not None
     node_names = list(graph.nodes.keys())
-    assert "plan_response" in node_names
+    assert "plan" in node_names
+    assert "load_task_state" in node_names
+    assert "task_state" in node_names
+    assert "plan_response" not in node_names

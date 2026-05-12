@@ -1026,7 +1026,7 @@ class RevisingDeepPlanProvider(DeepPlanProvider):
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_produces_deep_plan_events() -> None:
+async def test_plan_mode_runs_main_workflow_and_loads_task_list(tmp_path) -> None:
     provider = DeepPlanProvider()
 
     events = [
@@ -1036,24 +1036,29 @@ async def test_plan_mode_produces_deep_plan_events() -> None:
             "run-1",
             "Build a user authentication module",
             deps=AgentDeps(provider=provider),
-            settings=AgentSettings(
-                provider="ollama",
-                model="fake-model",
-                run_mode="plan",
-            ),
-        )
-    ]
+                settings=AgentSettings(
+                    provider="ollama",
+                    model="fake-model",
+                    run_mode="plan",
+                    workspace_root=tmp_path,
+                ),
+            )
+        ]
 
     event_types = [event.type for event in events]
-    assert "deep_plan_started" in event_types
-    assert "deep_plan_delta" in event_types
-    assert "plan_self_review_completed" in event_types
+    assert "plan_started" in event_types
+    assert "plan_completed" in event_types
+    assert "task_list_loaded" in event_types
+    assert "context_started" in event_types
+    assert "response_completed" in event_types
+    assert "deep_plan_started" not in event_types
+    assert "deep_plan_delta" not in event_types
     assert "run_completed" in event_types
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_revises_failed_plan_once_before_response() -> None:
-    provider = RevisingDeepPlanProvider()
+async def test_plan_mode_does_not_use_deep_plan_revision_route(tmp_path) -> None:
+    provider = DeepPlanProvider()
 
     events = [
         event
@@ -1062,24 +1067,24 @@ async def test_plan_mode_revises_failed_plan_once_before_response() -> None:
             "run-1",
             "Plan a health check endpoint",
             deps=AgentDeps(provider=provider),
-            settings=AgentSettings(
-                provider="ollama",
-                model="fake-model",
-                run_mode="plan",
-            ),
-        )
-    ]
+                settings=AgentSettings(
+                    provider="ollama",
+                    model="fake-model",
+                    run_mode="plan",
+                    workspace_root=tmp_path,
+                ),
+            )
+        ]
 
-    assert provider.deep_plan_calls == 2
+    event_types = [event.type for event in events]
+    assert "plan_self_review_completed" not in event_types
+    assert "deep_plan_started" not in event_types
     response = next(event for event in events if event.type == "response_completed")
-    assert "TODO" not in response.data["response"]
-    assert "backend/src/solo_agent/web/routes.py" in response.data["response"]
-    review = next(event for event in events if event.type == "plan_self_review_completed")
-    assert review.data["passed"] is True
+    assert response.data["response"]
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_skips_tool_execution() -> None:
+async def test_plan_mode_continues_through_tool_execution(tmp_path) -> None:
     provider = DeepPlanProvider()
     registry = HeuristicToolRegistry()
 
@@ -1090,25 +1095,26 @@ async def test_plan_mode_skips_tool_execution() -> None:
             "run-1",
             "Add a health check endpoint",
             deps=AgentDeps(provider=provider, tool_registry=registry),
-            settings=AgentSettings(
-                provider="ollama",
-                model="fake-model",
-                run_mode="plan",
-            ),
-        )
-    ]
+                settings=AgentSettings(
+                    provider="ollama",
+                    model="fake-model",
+                    run_mode="plan",
+                    workspace_root=tmp_path,
+                ),
+            )
+        ]
 
     event_types = [event.type for event in events]
-    assert "tool_call_started" not in event_types
-    assert "tool_call_completed" not in event_types
+    assert "tool_call_started" in event_types
+    assert "tool_call_completed" in event_types
     assert "tool_call_failed" not in event_types
     assert "plan_completed" in event_types
-    assert registry.calls == []
+    assert registry.calls
     assert events[-1].type == "run_completed"
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_skips_patch_proposal() -> None:
+async def test_plan_mode_can_reach_patch_proposal_when_enabled(tmp_path) -> None:
     provider = DeepPlanProvider()
     registry = HeuristicToolRegistry()
 
@@ -1119,18 +1125,18 @@ async def test_plan_mode_skips_patch_proposal() -> None:
             "run-1",
             "Refactor the database layer",
             deps=AgentDeps(provider=provider, tool_registry=registry),
-            settings=AgentSettings(
-                provider="ollama",
-                model="fake-model",
-                run_mode="plan",
-                verified_editing_enabled=True,
-            ),
-        )
-    ]
+                settings=AgentSettings(
+                    provider="ollama",
+                    model="fake-model",
+                    run_mode="plan",
+                    verified_editing_enabled=True,
+                    workspace_root=tmp_path,
+                ),
+            )
+        ]
 
     event_types = [event.type for event in events]
-    assert "patch_generation_started" not in event_types
-    assert "patch_proposed" not in event_types
+    assert "patch_generation_started" in event_types
     assert events[-1].type == "run_completed"
 
 
@@ -1162,7 +1168,7 @@ async def test_agent_mode_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_with_memory() -> None:
+async def test_plan_mode_with_memory(tmp_path) -> None:
     persistence = TrackingPersistence()
     provider = DeepPlanProvider()
 
@@ -1173,17 +1179,18 @@ async def test_plan_mode_with_memory() -> None:
             "run-1",
             "Analyze the project",
             deps=AgentDeps(provider=provider, persistence=persistence),
-            settings=AgentSettings(
-                provider="ollama",
-                model="fake-model",
-                run_mode="plan",
-            ),
-        )
-    ]
+                settings=AgentSettings(
+                    provider="ollama",
+                    model="fake-model",
+                    run_mode="plan",
+                    workspace_root=tmp_path,
+                ),
+            )
+        ]
 
     assert "prefetch_all" in persistence.calls
     assert any(event.type == "memory_loaded" for event in events)
-    assert any(event.type == "deep_plan_started" for event in events)
+    assert any(event.type == "task_list_loaded" for event in events)
     assert events[-1].type == "run_completed"
 
 

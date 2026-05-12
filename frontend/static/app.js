@@ -68,10 +68,13 @@ const state = {
 };
 
 const terminalTypes = new Set(["completed", "run_completed", "failed", "cancelled"]);
-const debugOnlyEvents = new Set(["plan_delta", "response_delta", "deep_plan_delta"]);
+const debugOnlyEvents = new Set(["plan_delta", "response_delta"]);
 const timelineEvents = new Set([
   "started",
   "run_started",
+  "task_list_loaded",
+  "task_list_updated",
+  "task_list_skipped",
   "plan_started",
   "plan_completed",
   "context_started",
@@ -103,6 +106,9 @@ const agentEventNames = [
 const stageByEvent = {
   started: "received",
   run_started: "received",
+  task_list_loaded: "plan",
+  task_list_updated: "plan",
+  task_list_skipped: "plan",
   plan_started: "plan",
   plan_delta: "plan",
   plan_completed: "plan",
@@ -735,7 +741,6 @@ function appendTimelineEvent(event) {
 
 const noisyRawEvents = new Set([
   "plan_delta",
-  "deep_plan_delta",
   "response_delta",
 ]);
 
@@ -781,6 +786,9 @@ function eventLabel(type) {
   const labels = {
     started: "已接收",
     run_started: "开始",
+    task_list_loaded: "任务加载",
+    task_list_updated: "任务更新",
+    task_list_skipped: "任务跳过",
     plan_started: "规划中",
     plan_completed: "规划完成",
     context_started: "上下文",
@@ -812,6 +820,13 @@ function compactPayload(event) {
   }
   if (event.type === "response_completed" && data.response) {
     return prettyJson({ response_chars: data.response.length });
+  }
+  if (event.type.startsWith("task_list_")) {
+    return prettyJson({
+      task_count: data.task_count,
+      active_task: data.active_task,
+      tasks: data.tasks,
+    });
   }
   if (event.type.includes("tool_call")) {
     return prettyJson({

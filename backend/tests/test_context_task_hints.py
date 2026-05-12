@@ -87,7 +87,7 @@ def test_workspace_task_store_roundtrip(tmp_path: Path) -> None:
 
 
 def test_task_tools_are_registered_and_workspace_bounded(tmp_path: Path) -> None:
-    registry = create_default_registry(tmp_path)
+    registry = create_default_registry(tmp_path, is_plan_mode=True)
 
     created = registry.call(
         "task_create",
@@ -100,6 +100,30 @@ def test_task_tools_are_registered_and_workspace_bounded(tmp_path: Path) -> None
     assert created["ok"] is True
     assert updated["result"]["task"]["status"] == "completed"
     assert listed["result"]["tasks"][0]["id"] == task_id
+
+
+def test_write_todos_is_plan_mode_only_and_persists_by_thread(tmp_path: Path) -> None:
+    agent_registry = create_default_registry(tmp_path, is_plan_mode=False)
+    plan_registry = create_default_registry(tmp_path, is_plan_mode=True)
+
+    assert "write_todos" not in {tool["name"] for tool in agent_registry.list_tools()}
+    assert "write_todos" in {tool["name"] for tool in plan_registry.list_tools()}
+
+    updated = plan_registry.call(
+        "write_todos",
+        {
+            "thread_id": "session-1",
+            "tasks": [
+                {"id": "T-1", "subject": "Inspect workflow", "status": "completed"},
+                {"id": "T-2", "subject": "Wire write_todos", "status": "in_progress"},
+            ],
+        },
+    )
+    restored = WorkspaceTaskStore(tmp_path).load("session-1")
+
+    assert updated["ok"] is True
+    assert updated["result"]["tasks"][1]["status"] == "in_progress"
+    assert [item.subject for item in restored.items] == ["Inspect workflow", "Wire write_todos"]
 
 
 def test_subdirectory_hints_load_once_per_directory(tmp_path: Path) -> None:

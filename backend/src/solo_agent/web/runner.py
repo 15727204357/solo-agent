@@ -79,7 +79,10 @@ class AgentRunner:
                 sandbox_mode=settings.sandbox_mode,
                 workflow_runtime_root=settings.workflow_runtime_root,
             )
-            registry = create_default_registry(settings.workspace_root)
+            try:
+                registry = create_default_registry(settings.workspace_root, is_plan_mode=is_plan_mode)
+            except TypeError:
+                registry = create_default_registry(settings.workspace_root)
             provider = create_provider_from_settings(agent_settings)
             persistence = None
             if hasattr(self._repository, "memory_repository"):

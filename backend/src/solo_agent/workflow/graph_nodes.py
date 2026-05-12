@@ -109,8 +109,12 @@ def make_plan_node(provider: Any, settings: Any):
     return _make_node(_plan_node, provider, settings)
 
 
-def make_task_state_node():
-    return _make_node(_task_state_stage)
+def make_task_state_node(settings: Any | None = None):
+    if settings is None:
+        from solo_agent.agent.deps import AgentSettings
+
+        settings = AgentSettings()
+    return _make_node(_task_state_stage, settings)
 
 
 def make_parallelism_gate_node(settings: Any):

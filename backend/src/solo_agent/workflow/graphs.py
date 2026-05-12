@@ -154,8 +154,9 @@ def build_main_workflow_graph(
     # -----------------------------------------------------------------------
     # Plan route
     # -----------------------------------------------------------------------
+    graph.add_node("load_task_state", make_task_state_node(settings))
     graph.add_node("plan", make_plan_node(provider, settings))
-    graph.add_node("task_state", make_task_state_node())
+    graph.add_node("task_state", make_task_state_node(settings))
 
     # -----------------------------------------------------------------------
     # Agent serial path
@@ -230,7 +231,8 @@ def build_main_workflow_graph(
     graph.add_edge("skill_context", "context_guard_before_plan")
 
     # Plan vs agent route
-    graph.add_edge("context_guard_before_plan", "plan")
+    graph.add_edge("context_guard_before_plan", "load_task_state")
+    graph.add_edge("load_task_state", "plan")
 
     # Agent mode chain
     graph.add_conditional_edges(
@@ -388,6 +390,5 @@ def route_after_patch(state: SoloGraphState) -> str:
     if _is_awaiting_approval(state):
         return END
     return "subdirectory_hint"
-
 
 

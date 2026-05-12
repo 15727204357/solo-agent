@@ -27,6 +27,7 @@ async def run_agent_events(
     provider = deps.provider or create_provider_from_settings(settings)
     state = AgentState(session_id=session_id, run_id=run_id, user_input=user_input)
     state.run_mode = str(_setting(settings, "run_mode", "agent"))
+    state.is_plan_mode = state.run_mode == "plan" or bool(_setting(settings, "is_plan_mode", False))
     state.memory_enabled = bool(_setting(settings, "memory_enabled", True))
     state.conversation_history_enabled = bool(
         _setting(settings, "conversation_history_enabled", True)
@@ -62,4 +63,3 @@ async def run_agent_events(
         )
     finally:
         _BEHAVIOR_POLICY.finish_error_run(run_id)
-

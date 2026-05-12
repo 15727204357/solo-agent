@@ -45,8 +45,10 @@ class ToolRegistry:
         *,
         workspace_root: str | Path,
         inspectors: list[Inspector] | None = None,
+        is_plan_mode: bool = False,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
+        self.is_plan_mode = is_plan_mode
         self._tools: dict[str, ToolSpec] = {}
         self.inspectors: list[Inspector] = inspectors or [
             SecurityInspector(),
@@ -409,6 +411,30 @@ class ToolRegistry:
                 },
             )
         )
+        if self.is_plan_mode:
+            self.register(
+                ToolSpec(
+                    name="write_todos",
+                    description=(
+                        "Plan mode only: replace or merge the current session TaskList. "
+                        "Use for complex tasks that need explicit progress tracking."
+                    ),
+                    read_only=False,
+                    handler=self._workspace_tools.write_todos,
+                    category="task",
+                    risk_level="low",
+                    parameters={
+                        "tasks": (
+                            "List of task objects with optional id, subject, description, status, "
+                            "active_form, blocked_by, blocks, and metadata."
+                        ),
+                        "merge": "Whether to merge into the existing TaskList instead of replacing it.",
+                    },
+                )
+            )
+        else:
+            for name in ("task_create", "task_get", "task_list", "task_update"):
+                self._tools.pop(name, None)
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [
@@ -547,5 +573,5 @@ def _redact_large_text(value: str) -> str:
     return re.sub(r"\s+", " ", value[:4_000])
 
 
-def create_default_registry(workspace_root: str | Path) -> ToolRegistry:
-    return ToolRegistry(workspace_root=workspace_root)
+def create_default_registry(workspace_root: str | Path, *, is_plan_mode: bool = False) -> ToolRegistry:
+    return ToolRegistry(workspace_root=workspace_root, is_plan_mode=is_plan_mode)
