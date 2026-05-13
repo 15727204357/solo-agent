@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { initialRunViewState, runEventReducer } from "../runReducer";
+import { initialRunViewState, replayRunEvents, runEventReducer } from "../runReducer";
 import type { AgentEvent, RunViewState } from "../types";
 
 function apply(events: AgentEvent[], seed: RunViewState = initialRunViewState) {
@@ -39,6 +39,7 @@ describe("runEventReducer", () => {
             suitable: true,
             reason: "subagent_disabled",
             task_count: 2,
+            subagent_policy: "auto",
             subagent_enabled: false,
           },
         },
@@ -46,6 +47,7 @@ describe("runEventReducer", () => {
     ]);
 
     expect(state.parallelismDecision?.suitable).toBe(true);
+    expect(state.parallelismDecision?.subagent_policy).toBe("auto");
     expect(state.parallelismDecision?.subagent_enabled).toBe(false);
   });
 
@@ -93,6 +95,28 @@ describe("runEventReducer", () => {
 
     expect(failed.subagentTasks[0].status).toBe("failed");
     expect(failed.subagentTasks[0].error).toContain("missing.py");
+  });
+
+  it("handles task_blocked and replay restores it", () => {
+    const events: AgentEvent[] = [
+      {
+        type: "task_blocked",
+        payload: {
+          data: {
+            task_id: "task_blocked",
+            description: "Inspect app",
+            subagent_type: "general-purpose",
+            reason: "parallelism_gate_not_suitable",
+            error: "Task tool execution blocked: parallelism_gate_not_suitable",
+          },
+        },
+      },
+    ];
+
+    const state = replayRunEvents(events, true);
+
+    expect(state.subagentTasks[0].status).toBe("blocked");
+    expect(state.subagentTasks[0].reason).toBe("parallelism_gate_not_suitable");
   });
 
   it("caps raw events at 300", () => {

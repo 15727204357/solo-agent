@@ -211,6 +211,8 @@ def test_web_api_run_mode_defaults_to_agent() -> None:
 
     assert run.status_code == 202
     assert run.json()["metadata"]["run_mode"] == "agent"
+    assert run.json()["metadata"]["subagent_policy"] == "off"
+    assert run.json()["metadata"]["subagent_enabled"] is False
 
 
 def test_web_api_run_mode_explicit_plan() -> None:
@@ -229,6 +231,8 @@ def test_web_api_run_mode_explicit_plan() -> None:
 
     assert run.status_code == 202
     assert run.json()["metadata"]["run_mode"] == "plan"
+    assert run.json()["metadata"]["subagent_policy"] == "auto"
+    assert run.json()["metadata"]["subagent_enabled"] is True
 
 
 def test_web_api_run_mode_explicit_agent() -> None:
@@ -247,9 +251,11 @@ def test_web_api_run_mode_explicit_agent() -> None:
 
     assert run.status_code == 202
     assert run.json()["metadata"]["run_mode"] == "agent"
+    assert run.json()["metadata"]["subagent_policy"] == "off"
+    assert run.json()["metadata"]["subagent_enabled"] is False
 
 
-def test_web_api_create_run_accepts_subagent_enabled() -> None:
+def test_web_api_create_run_accepts_legacy_subagent_enabled_true_as_auto_policy() -> None:
     app = create_app()
     repo = InMemorySessionRepository()
     app.dependency_overrides[get_repository] = lambda: repo
@@ -265,10 +271,31 @@ def test_web_api_create_run_accepts_subagent_enabled() -> None:
 
     assert run.status_code == 202
     assert run.json()["metadata"]["run_mode"] == "agent"
-    assert run.json()["metadata"]["subagent_enabled"] is True
+    assert run.json()["metadata"]["subagent_policy"] == "auto"
+    assert run.json()["metadata"]["subagent_enabled"] is False
 
 
-def test_web_api_create_run_defaults_subagent_enabled_from_settings() -> None:
+def test_web_api_create_run_accepts_legacy_subagent_enabled_false_as_off_policy() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Subagent Off"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "inspect independent tasks", "run_mode": "plan", "subagent_enabled": False},
+        )
+
+    assert run.status_code == 202
+    assert run.json()["metadata"]["run_mode"] == "plan"
+    assert run.json()["metadata"]["subagent_policy"] == "off"
+    assert run.json()["metadata"]["subagent_enabled"] is False
+
+
+def test_web_api_create_run_plan_subagent_policy_off_disables_task_exposure() -> None:
     app = create_app()
     repo = InMemorySessionRepository()
     app.dependency_overrides[get_repository] = lambda: repo
@@ -279,11 +306,12 @@ def test_web_api_create_run_defaults_subagent_enabled_from_settings() -> None:
         session_id = session.json()["id"]
         run = client.post(
             f"/api/sessions/{session_id}/runs",
-            json={"prompt": "hello", "run_mode": "plan"},
+            json={"prompt": "hello", "run_mode": "plan", "subagent_policy": "off"},
         )
 
     assert run.status_code == 202
     assert run.json()["metadata"]["run_mode"] == "plan"
+    assert run.json()["metadata"]["subagent_policy"] == "off"
     assert run.json()["metadata"]["subagent_enabled"] is False
 
 
@@ -309,6 +337,7 @@ def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
     settings = Settings(
         workspace_root=tmp_path,
+        subagent_policy="auto",
         subagent_enabled=False,
         max_concurrent_subagents=4,
         subagent_timeout_seconds=120,
@@ -334,7 +363,11 @@ def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
         )
 
     monkeypatch.setattr(runner_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(runner_module, "create_default_registry", lambda _root: object())
+    def fake_create_registry(_root, **kwargs):
+        captured["registry_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(runner_module, "create_default_registry", fake_create_registry)
     monkeypatch.setattr(runner_module, "create_provider_from_settings", lambda agent_settings: FakeProvider())
     monkeypatch.setattr(runner_module, "run_agent_events", fake_run_agent_events)
 
@@ -347,8 +380,90 @@ def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
 
     agent_settings = captured["settings"]
     assert captured["deps_settings"] is agent_settings
+    assert agent_settings.subagent_policy == "off"
     assert agent_settings.subagent_enabled is False
     assert agent_settings.max_concurrent_subagents == 4
     assert agent_settings.subagent_timeout_seconds == 120
     assert agent_settings.sandbox_mode == "local"
     assert agent_settings.workflow_runtime_root == ".tmp/runs"
+    assert captured["registry_kwargs"] == {"is_plan_mode": False, "subagent_enabled": False}
+
+
+def test_agent_runner_exposes_task_for_plan_auto(monkeypatch, tmp_path) -> None:
+    repo = InMemorySessionRepository()
+    captured: dict[str, object] = {}
+    settings = Settings(workspace_root=tmp_path, provider="ollama", model="fake-model")
+
+    class FakeProvider:
+        name = "fake"
+        model = "fake"
+
+    async def fake_run_agent_events(session_id, run_id, user_input, deps=None, settings=None):
+        captured["settings"] = settings
+        yield AgentEvent(type="run_completed", session_id=session_id, run_id=run_id, node="workflow", data={})
+
+    monkeypatch.setattr(runner_module, "get_settings", lambda: settings)
+    def fake_create_registry(_root, **kwargs):
+        captured["registry_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(runner_module, "create_default_registry", fake_create_registry)
+    monkeypatch.setattr(runner_module, "create_provider_from_settings", lambda agent_settings: FakeProvider())
+    monkeypatch.setattr(runner_module, "run_agent_events", fake_run_agent_events)
+
+    async def run() -> None:
+        session = await repo.create_session("Runner", None)
+        created = await repo.create_run(
+            session.id,
+            "hello",
+            metadata={"run_mode": "plan", "subagent_policy": "auto", "subagent_enabled": True},
+        )
+        await AgentRunner(repo).run(session.id, created.id)
+
+    asyncio.run(run())
+
+    agent_settings = captured["settings"]
+    assert agent_settings.run_mode == "plan"
+    assert agent_settings.subagent_policy == "auto"
+    assert agent_settings.subagent_enabled is True
+    assert captured["registry_kwargs"] == {"is_plan_mode": True, "subagent_enabled": True}
+
+
+def test_agent_runner_hides_task_for_plan_off(monkeypatch, tmp_path) -> None:
+    repo = InMemorySessionRepository()
+    captured: dict[str, object] = {}
+    settings = Settings(workspace_root=tmp_path, provider="ollama", model="fake-model")
+
+    class FakeProvider:
+        name = "fake"
+        model = "fake"
+
+    async def fake_run_agent_events(session_id, run_id, user_input, deps=None, settings=None):
+        captured["settings"] = settings
+        yield AgentEvent(type="run_completed", session_id=session_id, run_id=run_id, node="workflow", data={})
+
+    monkeypatch.setattr(runner_module, "get_settings", lambda: settings)
+    def fake_create_registry(_root, **kwargs):
+        captured["registry_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(runner_module, "create_default_registry", fake_create_registry)
+    monkeypatch.setattr(runner_module, "create_provider_from_settings", lambda agent_settings: FakeProvider())
+    monkeypatch.setattr(runner_module, "run_agent_events", fake_run_agent_events)
+
+    async def run() -> None:
+        session = await repo.create_session("Runner", None)
+        created = await repo.create_run(
+            session.id,
+            "hello",
+            metadata={"run_mode": "plan", "subagent_policy": "off", "subagent_enabled": False},
+        )
+        await AgentRunner(repo).run(session.id, created.id)
+
+    asyncio.run(run())
+
+    agent_settings = captured["settings"]
+    assert agent_settings.run_mode == "plan"
+    assert agent_settings.subagent_policy == "off"
+    assert agent_settings.subagent_enabled is False
+    assert captured["registry_kwargs"] == {"is_plan_mode": True, "subagent_enabled": False}

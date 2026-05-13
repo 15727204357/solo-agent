@@ -40,7 +40,8 @@ async def test_parallelism_gate_sets_parallel_strategy_when_all_conditions_pass(
 ```
 '''
 
-    events = [event async for event in _parallelism_gate_stage(state, AgentSettings(subagent_enabled=True))]
+    settings = AgentSettings(subagent_policy="auto", subagent_enabled=True)
+    events = [event async for event in _parallelism_gate_stage(state, settings)]
 
     assert [event.type for event in events] == [
         "parallelism_gate_started",
@@ -51,6 +52,7 @@ async def test_parallelism_gate_sets_parallel_strategy_when_all_conditions_pass(
     assert state.parallelism_decision["allowed"] is True
     assert state.parallelism_decision["suitable"] is True
     assert state.parallelism_decision["subagent_enabled"] is True
+    assert state.parallelism_decision["subagent_policy"] == "auto"
     assert state.snapshots["execution_strategy"] == "parallel"
     assert state.snapshots["parallelism_decision"]["strategy"] == "parallel"
 
@@ -103,8 +105,9 @@ async def test_parallelism_gate_records_suitable_but_serial_when_subagents_disab
     assert state.execution_strategy == "serial"
     assert state.parallelism_decision["suitable"] is True
     assert state.parallelism_decision["strategy"] == "serial"
-    assert state.parallelism_decision["reason"] == "subagent_disabled"
+    assert state.parallelism_decision["reason"] == "subagent_policy_off"
     assert state.parallelism_decision["subagent_enabled"] is False
+    assert state.parallelism_decision["subagent_policy"] == "off"
 
 
 @pytest.mark.asyncio
@@ -114,6 +117,7 @@ async def test_select_tools_proposes_task_only_when_subagent_enabled_and_suitabl
         "strategy": "parallel",
         "suitable": True,
         "subagent_enabled": True,
+        "subagent_policy": "auto",
         "task_count": 2,
         "candidates": [
             {"id": "T1", "title": "Inspect app", "read_paths": ["app.py"], "write_paths": []},
@@ -122,7 +126,11 @@ async def test_select_tools_proposes_task_only_when_subagent_enabled_and_suitabl
     }
     state.snapshots["parallelism_decision"] = state.parallelism_decision
 
-    calls = await _propose_tool_calls(TaskToolRegistry(), state, AgentSettings(max_tool_calls=3, subagent_enabled=True))
+    calls = await _propose_tool_calls(
+        TaskToolRegistry(),
+        state,
+        AgentSettings(max_tool_calls=3, subagent_policy="auto", subagent_enabled=True),
+    )
 
     assert [call["name"] for call in calls[:2]] == ["task", "task"]
     assert "Parent user task" in calls[0]["arguments"]["prompt"]
@@ -135,16 +143,21 @@ async def test_select_tools_does_not_propose_task_when_unsuitable() -> None:
         "strategy": "serial",
         "suitable": False,
         "subagent_enabled": True,
+        "subagent_policy": "auto",
         "task_count": 1,
         "candidates": [{"id": "T1", "title": "Single task"}],
     }
     state.snapshots["parallelism_decision"] = state.parallelism_decision
 
-    calls = await _propose_tool_calls(TaskToolRegistry(), state, AgentSettings(max_tool_calls=3, subagent_enabled=True))
+    calls = await _propose_tool_calls(
+        TaskToolRegistry(),
+        state,
+        AgentSettings(max_tool_calls=3, subagent_policy="auto", subagent_enabled=True),
+    )
     instruction = build_subagent_tool_instruction(state, task_tool_available=True)
 
     assert "task" not in [call["name"] for call in calls]
-    assert "usually do not call task" in instruction.lower()
+    assert "do not call task" in instruction.lower()
 
 
 def test_subagent_tool_instruction_omits_task_when_disabled() -> None:
