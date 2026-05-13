@@ -1,4 +1,4 @@
-export type RunStatus = "idle" | "queued" | "running" | "completed" | "failed" | "awaiting_approval";
+export type RunStatus = "idle" | "queued" | "running" | "completed" | "failed" | "cancelled" | "awaiting_approval";
 
 export type Session = {
   id: string;
@@ -88,6 +88,7 @@ export type SubagentTaskView = {
   result?: string;
   error?: string;
   reason?: string;
+  metadata?: Record<string, unknown>;
   readPaths?: string[];
 };
 
@@ -102,6 +103,7 @@ export type RunViewState = {
   toolCalls: ToolCallView[];
   subagentTasks: SubagentTaskView[];
   rawEvents: AgentEvent[];
+  lastError?: string;
 };
 
 export type ComposerSettings = {

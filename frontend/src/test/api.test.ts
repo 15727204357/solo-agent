@@ -33,4 +33,15 @@ describe("buildCreateRunPayload", () => {
 
     expect(payload).not.toHaveProperty("subagent_enabled");
   });
+
+  it("passes memory and conversation history flags", () => {
+    const payload = buildCreateRunPayload("remember this", {
+      planMode: false,
+      memoryEnabled: false,
+      conversationHistoryEnabled: true,
+    });
+
+    expect(payload.memory_enabled).toBe(false);
+    expect(payload.conversation_history_enabled).toBe(true);
+  });
 });

@@ -99,6 +99,49 @@ def test_web_api_patch_approve_applies_and_verifies(monkeypatch) -> None:
     assert asyncio.run(repo.get_run(session_id, run["id"])).status == "completed"
 
 
+def test_web_api_cancel_running_run_marks_cancelled_and_stream_closes() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    async def setup() -> tuple[str, str]:
+        session = await repo.create_session("Cancel", None)
+        run = await repo.create_run(session.id, "long task")
+        await repo.mark_run_status(session.id, run.id, "running")
+        return session.id, run.id
+
+    session_id, run_id = asyncio.run(setup())
+    with TestClient(app) as client:
+        cancelled = client.post(f"/api/sessions/{session_id}/runs/{run_id}/cancel")
+        events = client.get(f"/api/sessions/{session_id}/runs/{run_id}/events")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert "Run cancelled by user" in events.text
+    assert asyncio.run(repo.get_run(session_id, run_id)).status == "cancelled"
+
+
+def test_web_api_cancel_completed_run_is_idempotent() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    async def setup() -> tuple[str, str]:
+        session = await repo.create_session("Cancel", None)
+        run = await repo.create_run(session.id, "done task")
+        await repo.mark_run_status(session.id, run.id, "completed")
+        return session.id, run.id
+
+    session_id, run_id = asyncio.run(setup())
+    with TestClient(app) as client:
+        cancelled = client.post(f"/api/sessions/{session_id}/runs/{run_id}/cancel")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "completed"
+
+
 def test_web_api_memory_inbox_approve_reject_and_revoke() -> None:
     app = create_app()
     repo = InMemorySessionRepository()

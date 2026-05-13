@@ -106,7 +106,11 @@ export function runEventReducer(state: RunViewState, action: RunReducerAction): 
   }
 
   if (event.type === "failed" || event.type === "error" || event.type === "cancelled") {
-    next = { ...next, status: "failed" };
+    next = {
+      ...next,
+      status: event.type === "cancelled" ? "cancelled" : "failed",
+      lastError: event.message || (typeof data.error === "string" ? data.error : undefined),
+    };
   }
 
   return next;
@@ -181,6 +185,7 @@ function toSubagentTask(data: Record<string, unknown>, status: SubagentTaskView[
     result: typeof data.result === "string" ? data.result : undefined,
     error: typeof data.error === "string" ? data.error : undefined,
     reason: typeof data.reason === "string" ? data.reason : undefined,
+    metadata: isRecord(data.metadata) ? data.metadata : undefined,
     readPaths: Array.isArray(data.read_paths) ? data.read_paths.map(String) : undefined,
   };
 }

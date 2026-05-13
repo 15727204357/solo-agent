@@ -207,7 +207,7 @@ function SubagentsPanel({ state }: { state: RunViewState }) {
             </div>
             <span className={`status-chip ${task.status === "failed" ? "chip-danger" : task.status === "blocked" ? "chip-warn" : ""}`}>{task.status}</span>
           </div>
-          <p className="mt-2 text-xs text-slate-500">Scoped Task · {task.subagentType}</p>
+          <p className="mt-2 text-xs text-slate-500">Scoped Task · {task.subagentType} · {subagentModeLabel(task.metadata)}</p>
           {task.result ? <p className="mt-3 whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200">{task.result}</p> : null}
           {task.reason ? <p className="mt-3 text-sm text-amber-700 dark:text-amber-300">{task.reason}</p> : null}
           {task.error ? <p className="mt-3 text-sm text-red-600 dark:text-red-300">{task.error}</p> : null}
@@ -311,4 +311,15 @@ function taskTitle(task?: TaskListItem | null) {
     return "";
   }
   return task.subject || task.title || task.description || task.id || "Untitled task";
+}
+
+function subagentModeLabel(metadata?: Record<string, unknown>) {
+  const mode = String(metadata?.mode || "sync_readonly");
+  if (mode === "sync_child_agent") {
+    return "只读子代理分析";
+  }
+  if (mode === "sync_readonly") {
+    return "只读证据收集";
+  }
+  return mode;
 }

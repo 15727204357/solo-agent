@@ -4,12 +4,27 @@ import pytest
 from solo_agent.agent import AgentDeps, AgentSettings
 from solo_agent.agent.state import AgentState
 from solo_agent.context import WorkspaceTaskStore
+from solo_agent.providers import ChatMessage
 from solo_agent.tools import create_default_registry
 from solo_agent.workflow.stages import _execute_tools_node, _task_state_stage
 
 
 async def _collect(stage):
     return [event async for event in stage]
+
+
+class FakeSubagentProvider:
+    name = "fake"
+    model = "fake-model"
+
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        return "Scoped finding from provider."
 
 
 @pytest.mark.asyncio
@@ -178,8 +193,35 @@ async def test_execute_tools_blocks_task_when_parallelism_unsuitable(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_execute_tools_blocks_task_when_subagent_disabled(tmp_path) -> None:
+    settings = AgentSettings(workspace_root=tmp_path, subagent_policy="auto", subagent_enabled=False)
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+    state = AgentState(session_id="s-subagent", run_id="r-disabled", user_input="parallel")
+    state.parallelism_decision = {
+        "strategy": "parallel",
+        "suitable": True,
+        "subagent_policy": "auto",
+        "subagent_enabled": False,
+    }
+    state.snapshots["parallelism_decision"] = state.parallelism_decision
+    state.snapshots["proposed_tool_calls"] = [
+        {"name": "task", "arguments": {"description": "Inspect app", "prompt": "Inspect app."}}
+    ]
+    deps = AgentDeps(tool_registry=registry, safety_inspector=registry, settings=settings)
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    blocked = next(event for event in events if event.type == "task_blocked")
+
+    assert blocked.data["reason"] == "subagent_disabled"
+    assert blocked.data["status"] == "blocked"
+    assert blocked.data["metadata"]["blocked"] is True
+    assert state.tool_calls[0].blocked is True
+    assert not state.blocked
+
+
+@pytest.mark.asyncio
 async def test_execute_tools_blocks_task_when_policy_off(tmp_path) -> None:
-    settings = AgentSettings(workspace_root=tmp_path, subagent_policy="off", subagent_enabled=False)
+    settings = AgentSettings(workspace_root=tmp_path, subagent_policy="off", subagent_enabled=True)
     registry = create_default_registry(tmp_path, subagent_enabled=True)
     state = AgentState(session_id="s-subagent", run_id="r4", user_input="parallel")
     state.parallelism_decision = {
@@ -199,6 +241,30 @@ async def test_execute_tools_blocks_task_when_policy_off(tmp_path) -> None:
 
     assert blocked.data["reason"] == "subagent_policy_off"
     assert not any(event.type == "task_started" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_blocks_task_when_parallel_strategy_not_parallel(tmp_path) -> None:
+    settings = AgentSettings(workspace_root=tmp_path, subagent_policy="auto", subagent_enabled=True)
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+    state = AgentState(session_id="s-subagent", run_id="r-serial", user_input="parallel")
+    state.parallelism_decision = {
+        "strategy": "serial",
+        "suitable": True,
+        "subagent_policy": "auto",
+        "subagent_enabled": True,
+    }
+    state.snapshots["parallelism_decision"] = state.parallelism_decision
+    state.snapshots["proposed_tool_calls"] = [
+        {"name": "task", "arguments": {"description": "Inspect app", "prompt": "Inspect app."}}
+    ]
+    deps = AgentDeps(tool_registry=registry, safety_inspector=registry, settings=settings)
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    blocked = next(event for event in events if event.type == "task_blocked")
+
+    assert blocked.data["reason"] == "parallelism_gate_not_parallel"
+    assert not state.blocked
 
 
 @pytest.mark.asyncio
@@ -269,3 +335,72 @@ async def test_execute_tools_separates_normal_cutoff_from_task_budget(tmp_path) 
     assert "search_text" not in completed_names
     assert "task" in completed_names
     assert any(event.type == "tool_cut_off_applied" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_task_ignores_normal_cutoff_after_read_file(tmp_path) -> None:
+    (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    settings = AgentSettings(
+        workspace_root=tmp_path,
+        subagent_policy="auto",
+        subagent_enabled=True,
+        tool_call_cut_off=1,
+        max_concurrent_subagents=1,
+    )
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+    state = AgentState(session_id="s-subagent", run_id="r7", user_input="parallel")
+    state.parallelism_decision = {
+        "strategy": "parallel",
+        "suitable": True,
+        "subagent_policy": "auto",
+        "subagent_enabled": True,
+    }
+    state.snapshots["parallelism_decision"] = state.parallelism_decision
+    state.snapshots["proposed_tool_calls"] = [
+        {"name": "read_file", "arguments": {"path": "app.py"}},
+        {"name": "search_text", "arguments": {"query": "ok"}},
+        {"name": "task", "arguments": {"description": "Inspect", "prompt": "Inspect.", "read_paths": ["app.py"]}},
+    ]
+    deps = AgentDeps(tool_registry=registry, safety_inspector=registry, settings=settings)
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    completed_names = [
+        event.data["name"]
+        for event in events
+        if event.type == "tool_call_completed" and not event.data.get("blocked")
+    ]
+
+    assert completed_names.count("read_file") == 1
+    assert "search_text" not in completed_names
+    assert "task" in completed_names
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_runs_task_through_sync_subagent_runner(tmp_path) -> None:
+    (tmp_path / "app.py").write_text("def service():\n    return 'ok'\n", encoding="utf-8")
+    settings = AgentSettings(workspace_root=tmp_path, subagent_policy="auto", subagent_enabled=True)
+    registry = create_default_registry(tmp_path, subagent_enabled=True)
+    state = AgentState(session_id="s-subagent", run_id="r-runner", user_input="parallel")
+    state.parallelism_decision = {
+        "strategy": "parallel",
+        "suitable": True,
+        "subagent_policy": "auto",
+        "subagent_enabled": True,
+    }
+    state.snapshots["parallelism_decision"] = state.parallelism_decision
+    state.snapshots["proposed_tool_calls"] = [
+        {"name": "task", "arguments": {"description": "Inspect", "prompt": "Inspect.", "read_paths": ["app.py"]}},
+    ]
+    deps = AgentDeps(
+        provider=FakeSubagentProvider(),
+        tool_registry=registry,
+        safety_inspector=registry,
+        settings=settings,
+    )
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    completed = next(event for event in events if event.type == "task_completed")
+
+    assert completed.data["metadata"]["mode"] == "sync_child_agent"
+    assert "Scoped finding from provider" in completed.data["result"]
+    assert state.subagent_results

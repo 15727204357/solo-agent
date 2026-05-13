@@ -117,6 +117,9 @@ class AgentRunner:
                 deps=deps,
                 settings=agent_settings,
             ):
+                current = await self._repository.get_run(session_id, run_id)
+                if current is not None and current.status == "cancelled":
+                    break
                 await self._repository.append_event(
                     session_id,
                     run_id,
@@ -126,12 +129,17 @@ class AgentRunner:
                 )
                 if event.type == "patch_approval_required":
                     awaiting_approval = True
+                current = await self._repository.get_run(session_id, run_id)
+                if current is not None and current.status == "cancelled":
+                    break
 
-            await self._repository.mark_run_status(
-                session_id,
-                run_id,
-                "awaiting_approval" if awaiting_approval else "completed",
-            )
+            current = await self._repository.get_run(session_id, run_id)
+            if current is None or current.status != "cancelled":
+                await self._repository.mark_run_status(
+                    session_id,
+                    run_id,
+                    "awaiting_approval" if awaiting_approval else "completed",
+                )
         except Exception as exc:  # pragma: no cover - defensive boundary for background tasks.
             await self._repository.append_event(
                 session_id,

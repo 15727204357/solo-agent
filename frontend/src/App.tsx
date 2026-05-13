@@ -13,6 +13,7 @@ import {
 import { FormEvent, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   buildCreateRunPayload,
+  cancelRun,
   createRun,
   createSession,
   getHealth,
@@ -216,6 +217,33 @@ export function App() {
     }
   };
 
+  const stopRun = async () => {
+    if (!activeSession || !activeRun || !running) {
+      return;
+    }
+    setNotice("正在取消运行...");
+    try {
+      const cancelled = await cancelRun(activeSession.id, activeRun.id);
+      setActiveRun(cancelled);
+      dispatchRun({
+        type: "event",
+        event: {
+          type: "cancelled",
+          session_id: activeSession.id,
+          run_id: activeRun.id,
+          message: "Run cancelled by user",
+          payload: { data: { reason: "user_cancelled" } },
+        },
+      });
+      sourceRef.current?.close();
+      sourceRef.current = null;
+      setNotice("运行已取消");
+      refreshSessions().catch(() => undefined);
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  };
+
   const displayMessages = useMemo(() => {
     const hasAssistantForRun = Boolean(activeRun && messages.some((message) => message.run_id === activeRun.id && message.role === "assistant"));
     if (!activeRun || !runState.responseText || hasAssistantForRun) {
@@ -312,7 +340,7 @@ export function App() {
                 <ChevronDown size={14} />
               </button>
               <div className="ml-auto flex items-center gap-2">
-                <button className="secondary-button" type="button" disabled title="后端 stop API 尚未实现">
+                <button className="secondary-button" type="button" disabled={!running || !activeRun} onClick={stopRun}>
                   <StopCircle size={16} />
                   停止
                 </button>

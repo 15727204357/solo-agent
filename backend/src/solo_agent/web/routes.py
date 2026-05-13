@@ -310,6 +310,30 @@ async def create_run(
     }
 
 
+@router.post("/api/sessions/{session_id}/runs/{run_id}/cancel")
+async def cancel_run(
+    session_id: str,
+    run_id: str,
+    repo: Annotated[SessionRepository, Depends(get_repository)],
+) -> dict[str, object]:
+    run = await repo.get_run(session_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status in {"completed", "failed", "cancelled"}:
+        return run.to_public_dict()
+
+    await repo.append_event(
+        session_id,
+        run_id,
+        "cancelled",
+        "Run cancelled by user",
+        {"data": {"reason": "user_cancelled"}},
+    )
+    await repo.mark_run_status(session_id, run_id, "cancelled")
+    updated = await repo.get_run(session_id, run_id)
+    return (updated or run).to_public_dict()
+
+
 def _resolve_subagent_policy(
     *,
     run_mode: str,

@@ -27,6 +27,7 @@ from solo_agent.context import SubdirectoryHintTracker, TaskListState, Workspace
 from solo_agent.providers import ChatMessage, ChatProvider
 from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequest, build_patch_proposal, extract_patch_request
 from solo_agent.workflow.parallelism import evaluate_independence, extract_task_candidates_from_text
+from solo_agent.workflow.subagent_runner import SubagentRunner
 
 _BEHAVIOR_POLICY = BehaviorPolicy()
 
@@ -700,7 +701,15 @@ async def _execute_tools_node(
         )
         # 错误恢复：包裹工具调用
         try:
-            raw_result = await _call_tool(deps.tool_registry, name, arguments)
+            if name == "task" and deps.provider is not None:
+                raw_result = await _run_subagent_task(
+                    deps=deps,
+                    settings=settings,
+                    state=state,
+                    arguments=arguments,
+                )
+            else:
+                raw_result = await _call_tool(deps.tool_registry, name, arguments)
         except Exception as exc:
             if name == "task":
                 yield _event(
@@ -824,6 +833,7 @@ async def _execute_tools_node(
                         "subagent_type": task_result.get("subagent_type", arguments.get("subagent_type", "general-purpose")),
                         "status": task_status,
                         "result": _task_result_summary(task_result.get("result", "")),
+                        "metadata": dict(task_result.get("metadata") or {}),
                     },
                 )
             else:
@@ -838,6 +848,7 @@ async def _execute_tools_node(
                         "subagent_type": task_result.get("subagent_type", arguments.get("subagent_type", "general-purpose")),
                         "status": task_status,
                         "error": task_result.get("error") or _tool_error_message(raw_result),
+                        "metadata": dict(task_result.get("metadata") or {}),
                     },
                 )
         if raw_result_ok:
@@ -1500,6 +1511,37 @@ async def _call_tool_if_available(tool_registry: Any | None, name: str, argument
     return await _call_tool(tool_registry, name, arguments)
 
 
+async def _run_subagent_task(
+    *,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+    state: AgentState,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    runner = SubagentRunner(
+        provider=deps.provider,
+        tool_registry=deps.tool_registry,
+        settings=_coerce_agent_settings(settings),
+    )
+    result = await runner.run(
+        task_id=str(arguments.get("task_id") or ""),
+        description=str(arguments.get("description") or ""),
+        prompt=str(arguments.get("prompt") or ""),
+        subagent_type=str(arguments.get("subagent_type") or "general-purpose"),
+        read_paths=[str(path) for path in arguments.get("read_paths") or []],
+        allowed_tools=[str(tool) for tool in arguments.get("allowed_tools") or []],
+        timeout_seconds=int(arguments.get("timeout_seconds") or _setting(settings, "subagent_timeout_seconds", 900)),
+        parent_session_id=state.session_id,
+        parent_run_id=state.run_id,
+    )
+    return {
+        "ok": result.get("status") != "failed",
+        "tool": "task",
+        "result": result,
+        "metadata": dict(result.get("metadata") or {}),
+    }
+
+
 def _extract_tool_result(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -1549,15 +1591,15 @@ def _task_gate_block_reason(
     task_tool_count: int,
 ) -> str | None:
     decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
+    if not bool(_setting(settings, "subagent_enabled", False)):
+        return "subagent_disabled"
     policy = str(_setting(settings, "subagent_policy", decision.get("subagent_policy", "off")))
     if policy != "auto":
         return "subagent_policy_off"
-    if not bool(_setting(settings, "subagent_enabled", False)):
-        return "subagent_disabled"
     if not bool(decision.get("suitable", decision.get("allowed", False))):
         return "parallelism_gate_not_suitable"
     if str(decision.get("strategy", "serial")) != "parallel":
-        return "parallelism_gate_not_suitable"
+        return "parallelism_gate_not_parallel"
     budget = int(_setting(settings, "max_concurrent_subagents", 3))
     if task_tool_count >= budget:
         return "task_budget_exceeded"
@@ -1569,6 +1611,7 @@ def _blocked_task_result(
     reason: str,
     parallelism_decision: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    decision_payload = dict(parallelism_decision) if isinstance(parallelism_decision, Mapping) else {}
     return {
         "task_id": str(arguments.get("task_id", "")),
         "description": str(arguments.get("description", "")),
@@ -1576,8 +1619,11 @@ def _blocked_task_result(
         "status": "blocked",
         "reason": reason,
         "error": f"Task tool execution blocked: {reason}",
+        "result": "",
+        "evidence": [],
         "read_paths": list(arguments.get("read_paths") or []),
-        "parallelism_decision": dict(parallelism_decision or {}),
+        "parallelism_decision": decision_payload,
+        "metadata": {"blocked": True},
     }
 
 

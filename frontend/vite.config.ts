@@ -10,8 +10,8 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "../static",
-    emptyOutDir: false,
+    outDir: "static",
+    emptyOutDir: true,
     rollupOptions: {
       input: "src/main.tsx",
       output: {

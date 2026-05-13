@@ -62,6 +62,12 @@ export async function createRun(sessionId: string, payload: CreateRunPayload): P
   });
 }
 
+export async function cancelRun(sessionId: string, runId: string): Promise<RunRecord> {
+  return requestJson<RunRecord>(`/api/sessions/${sessionId}/runs/${runId}/cancel`, {
+    method: "POST",
+  });
+}
+
 export async function getRunEventHistory(sessionId: string, runId: string, limit = 1000) {
   const data = await requestJson<{ items: unknown[] }>(
     `/api/sessions/${sessionId}/runs/${runId}/events/history?limit=${limit}`,
