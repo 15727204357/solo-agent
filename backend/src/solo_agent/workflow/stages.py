@@ -486,36 +486,16 @@ async def _execute_tools_node(
     available_tools = await _available_tool_names(deps.tool_registry) if deps.tool_registry is not None else set()
     cutoff = int(_setting(settings, "tool_call_cut_off", _setting(settings, "max_tool_calls", 3)))
     output_max_bytes = int(_setting(settings, "tool_output_max_bytes", 12_000))
-    attempted = 0
-    if cutoff <= 0:
-        yield _event(
-            state,
-            "tool_cut_off_applied",
-            "execute_tools",
-            "Tool call cutoff prevented execution",
-            {"cutoff": cutoff, "proposed_count": len(proposed), "executed_count": 0},
-        )
-        return
+    normal_tool_count = 0
+    task_tool_count = 0
+    started_count = 0
+    cutoff_event_emitted = False
 
     pending = [dict(call) for call in proposed if isinstance(call, Mapping)]
     index = 0
     while index < len(pending):
         call = pending[index]
         index += 1
-        if attempted >= cutoff:
-            yield _event(
-                state,
-                "tool_cut_off_applied",
-                "execute_tools",
-                "Tool call cutoff reached; remaining tools skipped",
-                {
-                    "cutoff": cutoff,
-                    "proposed_count": len(proposed),
-                    "executed_count": attempted,
-                    "skipped_count": len(pending) - attempted,
-                },
-            )
-            break
 
         name = str(call.get("name", "unknown"))
         arguments = dict(call.get("arguments") or {})
@@ -526,13 +506,86 @@ async def _execute_tools_node(
                 arguments["thread_id"] = state.session_id
             if not arguments.get("task_id"):
                 arguments["task_id"] = _stable_subagent_task_id(arguments, state.session_id)
-        attempted += 1
+        call = {**call, "name": name, "arguments": arguments}
+
+        if name == "task":
+            block_reason = _task_gate_block_reason(settings, state, task_tool_count)
+            if block_reason is not None:
+                parallelism_decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision
+                blocked_result = _blocked_task_result(arguments, block_reason, parallelism_decision)
+                state.tool_calls.append(
+                    ToolCallRecord(
+                        name=name,
+                        arguments=arguments,
+                        result=blocked_result,
+                        blocked=True,
+                        reason=block_reason,
+                    )
+                )
+                state.context.append(
+                    {
+                        "source": "tool:task",
+                        "content": blocked_result,
+                        "metadata": {"blocked": True, "reason": block_reason},
+                    }
+                )
+                yield _event(
+                    state,
+                    "task_blocked",
+                    "execute_tools",
+                    f"Subagent task blocked: {block_reason}",
+                    blocked_result,
+                )
+                yield _event(
+                    state,
+                    "tool_call_completed",
+                    "execute_tools",
+                    "Task tool call blocked by subagent policy",
+                    {
+                        "name": name,
+                        "arguments": arguments,
+                        "result": blocked_result,
+                        "blocked": True,
+                        "reason": block_reason,
+                        "metadata": {"blocked": True, "category": "subagent"},
+                    },
+                )
+                continue
+            task_tool_count += 1
+        else:
+            if normal_tool_count >= cutoff:
+                if not cutoff_event_emitted:
+                    yield _event(
+                        state,
+                        "tool_cut_off_applied",
+                        "execute_tools",
+                        "Normal tool call cutoff reached; remaining normal tools skipped",
+                        {
+                            "cutoff": cutoff,
+                            "proposed_count": len(proposed),
+                            "normal_tool_count": normal_tool_count,
+                            "task_tool_count": task_tool_count,
+                            "skipped_count": len(pending) - index + 1,
+                        },
+                    )
+                    cutoff_event_emitted = True
+                continue
+            normal_tool_count += 1
+
+        started_count += 1
         yield _event(
             state,
             "tool_call_started",
             "execute_tools",
             f"Calling tool {name}",
-            {"name": name, "arguments": arguments, "index": attempted, "cutoff": cutoff},
+            {
+                "name": name,
+                "arguments": arguments,
+                "index": started_count,
+                "cutoff": cutoff,
+                "normal_tool_count": normal_tool_count,
+                "task_tool_count": task_tool_count,
+            },
         )
         yield _event(
             state,
@@ -813,7 +866,7 @@ async def _execute_tools_node(
                 "A file edit was applied; verification is required",
                 {"recommended_tools": ["run_pytest", "run_ruff_check"]},
             )
-            remaining_budget = cutoff - attempted
+            remaining_budget = cutoff - normal_tool_count
             if remaining_budget <= 0:
                 yield _event(
                     state,
@@ -823,7 +876,7 @@ async def _execute_tools_node(
                     {
                         "reason": "tool_call_cut_off_reached_after_edit",
                         "cutoff": cutoff,
-                        "executed_count": attempted,
+                        "executed_count": normal_tool_count,
                         "recommended_tools": ["run_pytest", "run_ruff_check"],
                     },
                 )
@@ -1088,10 +1141,13 @@ async def _parallelism_gate_stage(
         max_parallel=int(_setting(settings, "max_concurrent_subagents", 3)),
     )
     subagent_enabled = bool(_setting(settings, "subagent_enabled", False))
+    subagent_policy = str(_setting(settings, "subagent_policy", "off"))
     suitable = bool(decision.allowed)
-    strategy = "parallel" if suitable and subagent_enabled else "serial"
+    strategy = "parallel" if suitable and subagent_policy == "auto" and subagent_enabled else "serial"
     reason = decision.reason
-    if suitable and not subagent_enabled:
+    if subagent_policy == "off":
+        reason = "subagent_policy_off"
+    elif suitable and not subagent_enabled:
         reason = "subagent_disabled"
     decision_payload = {
         **decision.to_dict(),
@@ -1101,6 +1157,7 @@ async def _parallelism_gate_stage(
         "task_count": len(tasks),
         "candidates": [task.to_dict() for task in tasks],
         "subagent_enabled": subagent_enabled,
+        "subagent_policy": subagent_policy,
     }
 
     state.task_candidates = [task.to_dict() for task in tasks]
@@ -1311,9 +1368,18 @@ async def _propose_tool_calls(
 
     decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
     subagent_enabled = bool(decision.get("subagent_enabled", False))
+    subagent_policy = str(decision.get("subagent_policy", _setting(settings, "subagent_policy", "off")))
     suitable_for_task = bool(decision.get("suitable", decision.get("allowed", False)))
+    strategy = str(decision.get("strategy", "serial"))
     candidates = decision.get("candidates") or decision.get("tasks") or []
-    if "task" in available and subagent_enabled and suitable_for_task and len(candidates) >= 2:
+    if (
+        "task" in available
+        and subagent_enabled
+        and subagent_policy == "auto"
+        and suitable_for_task
+        and strategy == "parallel"
+        and len(candidates) >= 2
+    ):
         remaining = max(0, max_calls - len(calls))
         for candidate in candidates[:remaining]:
             if not isinstance(candidate, Mapping):
@@ -1474,6 +1540,44 @@ def _task_dispatch_from_arguments(arguments: Mapping[str, Any]) -> dict[str, Any
         "read_paths": list(arguments.get("read_paths") or []),
         "allowed_tools": list(arguments.get("allowed_tools") or []),
         "timeout_seconds": arguments.get("timeout_seconds"),
+    }
+
+
+def _task_gate_block_reason(
+    settings: AgentSettings | Mapping[str, Any],
+    state: AgentState,
+    task_tool_count: int,
+) -> str | None:
+    decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
+    policy = str(_setting(settings, "subagent_policy", decision.get("subagent_policy", "off")))
+    if policy != "auto":
+        return "subagent_policy_off"
+    if not bool(_setting(settings, "subagent_enabled", False)):
+        return "subagent_disabled"
+    if not bool(decision.get("suitable", decision.get("allowed", False))):
+        return "parallelism_gate_not_suitable"
+    if str(decision.get("strategy", "serial")) != "parallel":
+        return "parallelism_gate_not_suitable"
+    budget = int(_setting(settings, "max_concurrent_subagents", 3))
+    if task_tool_count >= budget:
+        return "task_budget_exceeded"
+    return None
+
+
+def _blocked_task_result(
+    arguments: Mapping[str, Any],
+    reason: str,
+    parallelism_decision: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "task_id": str(arguments.get("task_id", "")),
+        "description": str(arguments.get("description", "")),
+        "subagent_type": str(arguments.get("subagent_type") or "general-purpose"),
+        "status": "blocked",
+        "reason": reason,
+        "error": f"Task tool execution blocked: {reason}",
+        "read_paths": list(arguments.get("read_paths") or []),
+        "parallelism_decision": dict(parallelism_decision or {}),
     }
 
 
