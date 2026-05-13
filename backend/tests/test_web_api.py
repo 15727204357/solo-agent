@@ -249,6 +249,44 @@ def test_web_api_run_mode_explicit_agent() -> None:
     assert run.json()["metadata"]["run_mode"] == "agent"
 
 
+def test_web_api_create_run_accepts_subagent_enabled() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Subagent Toggle"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "inspect independent tasks", "run_mode": "agent", "subagent_enabled": True},
+        )
+
+    assert run.status_code == 202
+    assert run.json()["metadata"]["run_mode"] == "agent"
+    assert run.json()["metadata"]["subagent_enabled"] is True
+
+
+def test_web_api_create_run_defaults_subagent_enabled_from_settings() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    with TestClient(app) as client:
+        session = client.post("/api/sessions", json={"title": "Subagent Default"})
+        session_id = session.json()["id"]
+        run = client.post(
+            f"/api/sessions/{session_id}/runs",
+            json={"prompt": "hello", "run_mode": "plan"},
+        )
+
+    assert run.status_code == 202
+    assert run.json()["metadata"]["run_mode"] == "plan"
+    assert run.json()["metadata"]["subagent_enabled"] is False
+
+
 def test_web_api_run_mode_invalid_rejected() -> None:
     app = create_app()
     repo = InMemorySessionRepository()

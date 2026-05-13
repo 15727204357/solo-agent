@@ -37,6 +37,7 @@ class CreateRunRequest(BaseModel):
     memory_enabled: bool | None = None
     conversation_history_enabled: bool | None = None
     run_mode: Literal["agent", "plan"] | None = None
+    subagent_enabled: bool | None = None
 
 
 class UpdateMemoryCandidateRequest(BaseModel):
@@ -288,6 +289,11 @@ async def create_run(
             "memory_enabled": memory_enabled,
             "conversation_history_enabled": conversation_history_enabled,
             "run_mode": body.run_mode or "agent",
+            "subagent_enabled": (
+                settings.subagent_enabled
+                if body.subagent_enabled is None
+                else body.subagent_enabled
+            ),
         },
     )
     background_tasks.add_task(runner.run, session_id, run.id)

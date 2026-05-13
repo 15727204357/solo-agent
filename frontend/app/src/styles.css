@@ -1,0 +1,232 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #eef3f1;
+  color: #172024;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.dark body,
+body[data-theme="dark"] {
+  background: #071013;
+  color: #e2e8f0;
+}
+
+@layer components {
+  .app-shell {
+    @apply grid h-full min-h-0 grid-cols-1 bg-mist text-ink dark:bg-slate-950 dark:text-slate-100 lg:grid-cols-[280px_minmax(0,1fr)_390px];
+  }
+
+  .sidebar {
+    @apply hidden min-h-0 flex-col gap-4 border-r border-slate-200 bg-white/80 p-4 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80 lg:flex;
+  }
+
+  .brand {
+    @apply flex items-center gap-3;
+  }
+
+  .brand h2 {
+    @apply truncate text-lg font-semibold;
+  }
+
+  .brand p {
+    @apply text-xs text-slate-500;
+  }
+
+  .brand-mark {
+    @apply grid h-9 w-9 shrink-0 place-items-center rounded-md bg-ink text-sm font-semibold text-white dark:bg-slate-100 dark:text-slate-950;
+  }
+
+  .sidebar-section {
+    @apply space-y-2;
+  }
+
+  .section-label {
+    @apply flex items-center gap-2 text-xs font-medium uppercase text-slate-500;
+  }
+
+  .sidebar-input,
+  .title-input {
+    @apply w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-signal dark:border-slate-800 dark:bg-slate-950;
+  }
+
+  .session-list {
+    @apply min-h-0 space-y-2 overflow-auto;
+  }
+
+  .session-button {
+    @apply flex w-full flex-col gap-1 rounded-md border border-transparent px-3 py-2 text-left text-sm text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-800 dark:hover:bg-slate-900;
+  }
+
+  .session-button.active {
+    @apply border-signal bg-cyan-50 text-slate-950 dark:bg-cyan-950/40 dark:text-slate-50;
+  }
+
+  .chat-column {
+    @apply relative flex min-h-0 flex-col;
+  }
+
+  .workspace-header {
+    @apply sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-slate-200 bg-mist/85 px-4 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/85 md:px-6;
+  }
+
+  .header-meta {
+    @apply flex shrink-0 items-center gap-2;
+  }
+
+  .message-list {
+    @apply min-h-0 flex-1 space-y-4 overflow-auto px-4 py-6 pb-72 md:px-8;
+  }
+
+  .empty-thread {
+    @apply mx-auto mt-24 max-w-xl text-center;
+  }
+
+  .empty-thread h2 {
+    @apply text-2xl font-semibold text-slate-950 dark:text-slate-50;
+  }
+
+  .empty-thread p {
+    @apply mt-3 text-sm leading-6 text-slate-500;
+  }
+
+  .message-bubble {
+    @apply mx-auto max-w-3xl rounded-md border p-4 shadow-sm;
+  }
+
+  .message-user {
+    @apply border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900;
+  }
+
+  .message-agent {
+    @apply border-cyan-100 bg-white/90 dark:border-cyan-950 dark:bg-slate-950;
+  }
+
+  .message-meta {
+    @apply mb-3 flex items-center justify-between gap-3 text-xs font-medium text-slate-500;
+  }
+
+  .composer-zone {
+    @apply pointer-events-none absolute inset-x-0 bottom-0 z-20 mx-auto flex max-w-4xl flex-col gap-2 px-4 pb-4 md:px-8;
+  }
+
+  .composer,
+  .todo-dock {
+    @apply pointer-events-auto rounded-md border border-slate-200 bg-white/95 p-3 shadow-soft backdrop-blur dark:border-slate-800 dark:bg-slate-950/95;
+  }
+
+  .composer textarea {
+    @apply mt-2 max-h-44 min-h-24 w-full resize-none rounded-md border-0 bg-transparent p-2 text-sm leading-6 outline-none placeholder:text-slate-400;
+  }
+
+  .composer-actions {
+    @apply flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 dark:border-slate-800;
+  }
+
+  .advanced-settings {
+    @apply mt-3 grid gap-2 border-t border-slate-100 pt-3 dark:border-slate-800;
+  }
+
+  .workflow-panel {
+    @apply hidden min-h-0 flex-col border-l border-slate-200 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80 lg:flex;
+  }
+
+  .primary-button,
+  .secondary-button,
+  .mini-button,
+  .icon-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .primary-button {
+    @apply bg-ink px-4 py-2 text-white hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-300;
+  }
+
+  .secondary-button {
+    @apply border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-900;
+  }
+
+  .mini-button {
+    @apply border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300;
+  }
+
+  .icon-button {
+    @apply h-9 w-9 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-slate-900;
+  }
+
+  .status-pill,
+  .status-chip {
+    @apply inline-flex shrink-0 items-center rounded-md px-2 py-1 text-xs font-medium;
+  }
+
+  .status-pill {
+    @apply bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-200;
+  }
+
+  .status-running,
+  .status-queued {
+    @apply bg-cyan-100 text-cyan-900 dark:bg-cyan-950 dark:text-cyan-200;
+  }
+
+  .status-completed {
+    @apply bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200;
+  }
+
+  .status-failed {
+    @apply bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200;
+  }
+
+  .status-chip {
+    @apply bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300;
+  }
+
+  .chip-warn {
+    @apply bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200;
+  }
+
+  .chip-danger {
+    @apply bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200;
+  }
+
+  .tab-button {
+    @apply shrink-0 rounded-md px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:text-slate-100;
+  }
+
+  .tab-active {
+    @apply bg-ink text-white hover:bg-ink hover:text-white dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-slate-100 dark:hover:text-slate-950;
+  }
+
+  .info-strip {
+    @apply flex items-center justify-between rounded-md border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-950;
+  }
+
+  .todo-pill {
+    @apply inline-flex max-w-full items-center gap-1 truncate rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300;
+  }
+
+  .todo-in_progress {
+    @apply border-cyan-200 bg-cyan-50 text-cyan-950 dark:border-cyan-900 dark:bg-cyan-950/40 dark:text-cyan-100;
+  }
+
+  .todo-completed {
+    @apply opacity-60;
+  }
+
+  .todo-blocked {
+    @apply border-red-200 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100;
+  }
+}
