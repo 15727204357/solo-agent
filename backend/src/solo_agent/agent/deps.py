@@ -41,6 +41,7 @@ class AgentSettings:
     patch_max_tokens: int = 1400
     run_mode: str = "agent"
     is_plan_mode: bool = False
+    subagent_policy: str = "off"
     subagent_enabled: bool = False
     plan_deep_max_tokens: int = 6000
     max_concurrent_subagents: int = 3

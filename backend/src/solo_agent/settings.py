@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     plan_deep_max_tokens: int = 6000
 
     # DeerFlow-style workflow runtime settings.
+    subagent_policy: str = "auto"
     subagent_enabled: bool = False
     max_concurrent_subagents: int = 3
     subagent_timeout_seconds: int = 900
@@ -93,6 +94,15 @@ class Settings(BaseSettings):
             import warnings
             warnings.warn(f"max_concurrent_subagents {value} out of range, using default 3", stacklevel=2)
             return 3
+        return value
+
+    @field_validator("subagent_policy")
+    @classmethod
+    def validate_subagent_policy(cls, value: str) -> str:
+        if value not in ("off", "auto"):
+            import warnings
+            warnings.warn(f"Invalid subagent_policy '{value}', falling back to 'auto'", stacklevel=2)
+            return "auto"
         return value
 
     @field_validator("subagent_timeout_seconds")

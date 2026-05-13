@@ -37,6 +37,7 @@ class CreateRunRequest(BaseModel):
     memory_enabled: bool | None = None
     conversation_history_enabled: bool | None = None
     run_mode: Literal["agent", "plan"] | None = None
+    subagent_policy: Literal["off", "auto"] | None = None
     subagent_enabled: bool | None = None
 
 
@@ -282,18 +283,24 @@ async def create_run(
         if body.conversation_history_enabled is None
         else body.conversation_history_enabled
     )
+    run_mode = body.run_mode or "agent"
+    subagent_policy = _resolve_subagent_policy(
+        run_mode=run_mode,
+        requested_policy=body.subagent_policy,
+        legacy_enabled=body.subagent_enabled,
+        settings=settings,
+    )
+    resolved_subagent_enabled = run_mode == "plan" and subagent_policy == "auto"
+
     run = await repo.create_run(
         session_id=session_id,
         prompt=body.prompt.strip(),
         metadata={
             "memory_enabled": memory_enabled,
             "conversation_history_enabled": conversation_history_enabled,
-            "run_mode": body.run_mode or "agent",
-            "subagent_enabled": (
-                settings.subagent_enabled
-                if body.subagent_enabled is None
-                else body.subagent_enabled
-            ),
+            "run_mode": run_mode,
+            "subagent_policy": subagent_policy,
+            "subagent_enabled": resolved_subagent_enabled,
         },
     )
     background_tasks.add_task(runner.run, session_id, run.id)
@@ -301,6 +308,24 @@ async def create_run(
         **run.to_public_dict(),
         "stream_url": f"/api/sessions/{session_id}/runs/{run.id}/events",
     }
+
+
+def _resolve_subagent_policy(
+    *,
+    run_mode: str,
+    requested_policy: str | None,
+    legacy_enabled: bool | None,
+    settings: Settings,
+) -> str:
+    if requested_policy in {"off", "auto"}:
+        return requested_policy
+    if legacy_enabled is True:
+        return "auto"
+    if legacy_enabled is False:
+        return "off"
+    if run_mode == "plan":
+        return settings.subagent_policy
+    return "off"
 
 
 @router.get("/api/sessions/{session_id}/runs/{run_id}/patches")

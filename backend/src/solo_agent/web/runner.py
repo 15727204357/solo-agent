@@ -38,7 +38,16 @@ class AgentRunner:
             )
             run_mode = str(run.metadata.get("run_mode", "agent"))
             is_plan_mode = run_mode == "plan"
-            subagent_enabled = bool(run.metadata.get("subagent_enabled", settings.subagent_enabled))
+            default_policy = "auto" if is_plan_mode else "off"
+            subagent_policy = str(run.metadata.get("subagent_policy", default_policy))
+            if subagent_policy not in {"off", "auto"}:
+                subagent_policy = default_policy
+            subagent_enabled = bool(
+                run.metadata.get(
+                    "subagent_enabled",
+                    is_plan_mode and subagent_policy == "auto",
+                )
+            )
             agent_settings = AgentSettings(
                 provider=settings.provider,
                 workspace_root=settings.workspace_root,
@@ -73,6 +82,7 @@ class AgentRunner:
                 run_mode=run_mode,
                 is_plan_mode=is_plan_mode,
                 plan_deep_max_tokens=settings.plan_deep_max_tokens,
+                subagent_policy=subagent_policy,
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=settings.max_concurrent_subagents,
                 subagent_timeout_seconds=settings.subagent_timeout_seconds,
