@@ -339,16 +339,20 @@ def responder_user_prompt(state: AgentState) -> str:
 def build_subagent_tool_instruction(state: AgentState, *, task_tool_available: bool = False) -> str:
     decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
     subagent_enabled = bool(decision.get("subagent_enabled", False))
+    subagent_policy = str(decision.get("subagent_policy", "off"))
     suitable = bool(decision.get("suitable", decision.get("allowed", False)))
+    strategy = str(decision.get("strategy") or decision.get("mode") or "serial")
     candidates = decision.get("candidates") or decision.get("tasks") or []
-    if not subagent_enabled or not task_tool_available:
+    if subagent_policy == "off" or not subagent_enabled or not task_tool_available:
         return ""
 
     lines = [
         "## Subagent Tool Strategy",
-        f"parallelism_decision: strategy={decision.get('strategy') or decision.get('mode') or 'serial'}, "
+        "Plan mode is using the Auto subagent policy. The task tool is optional, not mandatory.",
+        f"parallelism_decision: strategy={strategy}, "
         f"suitable={suitable}, reason={decision.get('reason') or ''}, "
-        f"task_count={decision.get('task_count') or len(candidates)}",
+        f"task_count={decision.get('task_count') or len(candidates)}, "
+        f"subagent_policy={subagent_policy}",
     ]
     if candidates:
         lines.append("Candidate subtasks:")
@@ -359,11 +363,11 @@ def build_subagent_tool_instruction(state: AgentState, *, task_tool_available: b
                 f"- {item.get('id') or item.get('task_id')}: {item.get('title') or item.get('description') or 'subtask'} "
                 f"(read_paths={item.get('read_paths') or []})"
             )
-    if suitable:
+    if suitable and strategy == "parallel":
         lines.append(
-            "The task tool is available. Use it only for complex work that is clearly decomposable into "
-            "independent subtasks with scoped context. Do not call task for simple work, for a single subtask, "
-            "or when the result would not be useful to synthesize in the main agent."
+            "Consider task only for complex work that is clearly decomposable into independent parallel subtasks "
+            "with scoped context. Do not call task for simple work, for a single subtask, or when the result would "
+            "not be useful to synthesize in the main agent."
         )
         lines.append(
             "Every task prompt must be self-contained, include only necessary context, and ask the subagent "
@@ -371,8 +375,7 @@ def build_subagent_tool_instruction(state: AgentState, *, task_tool_available: b
         )
     else:
         lines.append(
-            "The task tool is available, but the current decision says parallelism is not suitable. "
-            "Usually do not call task unless a later tool-selection signal proves a clearly scoped independent subtask."
+            "Do not call task. The current parallelism_decision is not suitable for parallel subagent execution."
         )
     return "\n".join(lines)
 
