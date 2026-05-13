@@ -138,8 +138,13 @@ function ParallelismPanel({ state }: { state: RunViewState }) {
   }
   const suitable = Boolean(decision.suitable ?? decision.allowed);
   const subagentEnabled = Boolean(decision.subagent_enabled);
+  const subagentPolicy = String(decision.subagent_policy || (state.planMode ? "auto" : "off"));
   let headline = String(decision.reason || "串行执行");
-  if (suitable && !subagentEnabled) {
+  if (subagentPolicy === "off") {
+    headline = "子代理策略关闭";
+  } else if (state.planMode) {
+    headline = "Auto 子代理策略已启用，是否执行由并行门控决定";
+  } else if (suitable && !subagentEnabled) {
     headline = "任务适合并行，但子代理工具未启用";
   } else if (suitable && subagentEnabled) {
     headline = "主 Agent 可以选择 task 工具";
@@ -154,6 +159,7 @@ function ParallelismPanel({ state }: { state: RunViewState }) {
         <Metric label="strategy" value={String(decision.strategy || "-")} />
         <Metric label="suitable" value={String(suitable)} />
         <Metric label="task_count" value={String(decision.task_count ?? 0)} />
+        <Metric label="subagent_policy" value={subagentPolicy} />
         <Metric label="subagent_enabled" value={String(subagentEnabled)} />
       </div>
       <JsonDetails title="candidates" value={decision.candidates || []} />
@@ -199,10 +205,11 @@ function SubagentsPanel({ state }: { state: RunViewState }) {
               <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{task.description}</h3>
               <p className="mt-1 font-mono text-xs text-slate-500">{task.id}</p>
             </div>
-            <span className={`status-chip ${task.status === "failed" ? "chip-danger" : ""}`}>{task.status}</span>
+            <span className={`status-chip ${task.status === "failed" ? "chip-danger" : task.status === "blocked" ? "chip-warn" : ""}`}>{task.status}</span>
           </div>
           <p className="mt-2 text-xs text-slate-500">Scoped Task · {task.subagentType}</p>
           {task.result ? <p className="mt-3 whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200">{task.result}</p> : null}
+          {task.reason ? <p className="mt-3 text-sm text-amber-700 dark:text-amber-300">{task.reason}</p> : null}
           {task.error ? <p className="mt-3 text-sm text-red-600 dark:text-red-300">{task.error}</p> : null}
         </article>
       ))}

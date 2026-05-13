@@ -5,7 +5,7 @@ export type CreateRunPayload = {
   run_mode: "agent" | "plan";
   memory_enabled: boolean;
   conversation_history_enabled: boolean;
-  subagent_enabled?: boolean;
+  subagent_policy: "off" | "auto";
 };
 
 async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -21,12 +21,10 @@ export function buildCreateRunPayload(prompt: string, settings: ComposerSettings
   const payload: CreateRunPayload = {
     prompt,
     run_mode: settings.planMode ? "plan" : "agent",
+    subagent_policy: settings.planMode ? "auto" : "off",
     memory_enabled: settings.memoryEnabled,
     conversation_history_enabled: settings.conversationHistoryEnabled,
   };
-  if (settings.subagentEnabled) {
-    payload.subagent_enabled = true;
-  }
   return payload;
 }
 

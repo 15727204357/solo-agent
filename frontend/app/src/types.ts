@@ -63,6 +63,7 @@ export type ParallelismDecision = {
   task_count?: number;
   candidates?: unknown[];
   subagent_enabled?: boolean;
+  subagent_policy?: "off" | "auto" | string;
   [key: string]: unknown;
 };
 
@@ -83,9 +84,10 @@ export type SubagentTaskView = {
   id: string;
   description: string;
   subagentType: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "blocked";
   result?: string;
   error?: string;
+  reason?: string;
   readPaths?: string[];
 };
 
@@ -104,7 +106,6 @@ export type RunViewState = {
 
 export type ComposerSettings = {
   planMode: boolean;
-  subagentEnabled: boolean;
   memoryEnabled: boolean;
   conversationHistoryEnabled: boolean;
 };

@@ -97,6 +97,10 @@ export function runEventReducer(state: RunViewState, action: RunReducerAction): 
     next = { ...next, subagentTasks: upsertSubagentTask(next.subagentTasks, toSubagentTask(data, "failed")) };
   }
 
+  if (event.type === "task_blocked") {
+    next = { ...next, subagentTasks: upsertSubagentTask(next.subagentTasks, toSubagentTask(data, "blocked")) };
+  }
+
   if (event.type === "run_completed" || event.type === "completed") {
     next = { ...next, status: "completed" };
   }
@@ -176,6 +180,7 @@ function toSubagentTask(data: Record<string, unknown>, status: SubagentTaskView[
     status,
     result: typeof data.result === "string" ? data.result : undefined,
     error: typeof data.error === "string" ? data.error : undefined,
+    reason: typeof data.reason === "string" ? data.reason : undefined,
     readPaths: Array.isArray(data.read_paths) ? data.read_paths.map(String) : undefined,
   };
 }

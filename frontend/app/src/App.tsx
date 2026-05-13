@@ -41,6 +41,7 @@ const sseEventNames = [
   "task_started",
   "task_completed",
   "task_failed",
+  "task_blocked",
   "response_started",
   "response_delta",
   "response_completed",
@@ -54,7 +55,6 @@ const sseEventNames = [
 
 const defaultComposer: ComposerSettings = {
   planMode: false,
-  subagentEnabled: false,
   memoryEnabled: true,
   conversationHistoryEnabled: true,
 };
@@ -265,7 +265,7 @@ export function App() {
           {!displayMessages.length ? (
             <div className="empty-thread">
               <h2>开始一次真实工作流</h2>
-              <p>用一个输入框描述任务；需要计划时勾选计划模式，Scoped Task 能力放在高级设置里。</p>
+              <p>用一个输入框描述任务；需要计划时勾选计划模式，子代理策略会自动处理。</p>
             </div>
           ) : (
             displayMessages.map((message) => <MessageBubble key={message.id} message={message} />)
@@ -437,23 +437,28 @@ function AdvancedSettings({
   composer: ComposerSettings;
   onChange: React.Dispatch<React.SetStateAction<ComposerSettings>>;
 }) {
+  const subagentDescription = composer.planMode
+    ? "Auto in Plan mode. The parallelism gate decides whether task runs."
+    : "Off in Agent mode.";
+
   return (
     <div className="advanced-settings">
       <ToggleRow
-        label="启用 Scoped Task 工具"
-        description="只作为高级能力开关；是否调用由后端 parallelism_gate/select_tools/execute_tools 决定。"
-        checked={composer.subagentEnabled}
-        onChange={(checked) => onChange((current) => ({ ...current, subagentEnabled: checked }))}
+        label="Subagent policy"
+        description={subagentDescription}
+        checked={composer.planMode}
+        disabled
+        onChange={() => undefined}
       />
       <ToggleRow
         label="Memory"
-        description="继续传递 memory_enabled。"
+        description="Send memory_enabled with each run."
         checked={composer.memoryEnabled}
         onChange={(checked) => onChange((current) => ({ ...current, memoryEnabled: checked }))}
       />
       <ToggleRow
         label="Conversation history"
-        description="继续传递 conversation_history_enabled。"
+        description="Send conversation_history_enabled with each run."
         checked={composer.conversationHistoryEnabled}
         onChange={(checked) => onChange((current) => ({ ...current, conversationHistoryEnabled: checked }))}
       />
@@ -466,10 +471,12 @@ function ToggleRow({
   description,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   description: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -478,7 +485,7 @@ function ToggleRow({
         <span className="block text-sm font-medium text-slate-900 dark:text-slate-100">{label}</span>
         <span className="mt-1 block text-xs text-slate-500">{description}</span>
       </span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
     </label>
   );
 }
