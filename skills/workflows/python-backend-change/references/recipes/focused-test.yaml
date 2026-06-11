@@ -1,0 +1,20 @@
+{
+  "id": "focused-test",
+  "name": "Run focused backend tests",
+  "description": "Run the backend test suite when the task calls for pytest or verification.",
+  "when": ["pytest", "test", "failing test", "verification", "backend tests"],
+  "mode": "quality",
+  "priority": 70,
+  "run_policy": "auto",
+  "failure_policy": "continue",
+  "steps": [
+    {
+      "id": "pytest-backend",
+      "tool": "run_command",
+      "description": "Run backend pytest through the structured command sandbox.",
+      "risk_level": "medium-safe",
+      "arguments": {"command": "python", "args": ["-m", "pytest", "backend/tests", "-q"], "purpose": "Run focused backend tests from the Python backend recipe."}
+    }
+  ],
+  "success_criteria": ["Focused backend tests pass or failures are available for diagnosis."]
+}

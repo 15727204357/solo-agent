@@ -5,6 +5,7 @@ category: workflow
 triggers: [python backend, fastapi, sqlalchemy, pytest, api route, repository, agent graph]
 red_flags: [skip pytest, broad refactor, hidden behavior change]
 required_tools: [workspace_snapshot, search_text, read_file, prepare_edit, preview_patch, apply_text_edit, run_pytest, run_ruff_check]
+metadata: {"hermes": {"recipes": [{"id": "inspect", "file": "references/recipes/inspect.yaml"}, {"id": "focused-test", "file": "references/recipes/focused-test.yaml"}, {"id": "verify", "file": "references/recipes/verify.yaml"}]}}
 ---
 
 # Python Backend Change

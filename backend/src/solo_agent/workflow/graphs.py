@@ -15,6 +15,7 @@ from solo_agent.workflow.graph_nodes import (
     make_execute_tools_node,
     make_inspect_node,
     make_load_builtin_memory_node,
+    make_parallel_dispatch_node,
     make_parallelism_gate_node,
     make_persist_snapshot_node,
     make_plan_node,
@@ -27,11 +28,18 @@ from solo_agent.workflow.graph_nodes import (
     make_respond_node,
     make_select_tools_node,
     make_skill_context_node,
+    make_skill_evolution_node,
     make_skip_memory_node,
     make_spec_compliance_review_node,
     make_subdirectory_hint_node,
+    make_supervisor_review_node,
     make_sync_memory_node,
     make_task_state_node,
+    make_team_develop_node,
+    make_team_plan_node,
+    make_team_supervisor_node,
+    make_team_test_node,
+    make_wait_subagents_node,
 )
 from solo_agent.workflow.graph_state import SoloGraphState
 
@@ -66,6 +74,12 @@ def _memory_enabled_route(state: SoloGraphState) -> str:
     if agent_data.get("memory_enabled", True):
         return "load_builtin_memory"
     return "skip_memory"
+
+
+def _team_mode_enabled(state: SoloGraphState) -> bool:
+    agent_data = state.get("agent_state") or {}
+    run_mode = str(agent_data.get("run_mode") or "")
+    return bool((run_mode == "plan" or agent_data.get("is_plan_mode")) and agent_data.get("subagent_enabled"))
 
 
 
@@ -105,11 +119,11 @@ def build_main_workflow_graph(
     """Build the complete LangGraph StateGraph for the Solo Agent workflow.
 
     This is the sole orchestration graph covering all execution modes in a
-    single unified topology. Subagents are exposed as the ordinary ``task``
-    tool when enabled; they are not a graph path and are never auto-dispatched
-    by ``parallelism_gate``.
+    single unified topology. Subagents are owned by graph-level fan-out nodes
+    after the deterministic ``parallelism_gate`` proves task independence.
       - plan capability mode: same execution graph, stronger planning prompt
-      - agent workflow: plan -> gate -> context -> inspect -> tools -> review -> respond
+      - agent workflow: plan -> context -> inspect -> tools -> review -> respond
+      - team workflow: plan -> team_plan -> team_develop -> team_test -> team_supervisor
       - verified editing (propose 鈫?await approval 鈫?apply 鈫?verify 鈫?review)
       - error recovery (classify 鈫?recover/block)
       - memory prelude/postlude
@@ -139,6 +153,13 @@ def build_main_workflow_graph(
     # Agent serial path
     # -----------------------------------------------------------------------
     graph.add_node("parallelism_gate", make_parallelism_gate_node(settings))
+    graph.add_node("parallel_dispatch", make_parallel_dispatch_node(settings))
+    graph.add_node("wait_subagents", make_wait_subagents_node(provider, deps, settings))
+    graph.add_node("supervisor_review", make_supervisor_review_node(settings))
+    graph.add_node("team_plan", make_team_plan_node(settings))
+    graph.add_node("team_develop", make_team_develop_node(provider, deps, settings))
+    graph.add_node("team_test", make_team_test_node(deps, settings))
+    graph.add_node("team_supervisor", make_team_supervisor_node(deps, settings))
     graph.add_node("collect_context", make_collect_context_node(deps, settings))
     graph.add_node("inspect", make_inspect_node(deps))
     graph.add_node("select_tools", make_select_tools_node(deps, settings))
@@ -174,6 +195,7 @@ def build_main_workflow_graph(
     # -----------------------------------------------------------------------
     # Postlude: memory sync, persistence, emit completed
     # -----------------------------------------------------------------------
+    graph.add_node("skill_evolution", make_skill_evolution_node(deps, settings))
     graph.add_node("sync_memory", make_sync_memory_node(deps))
     graph.add_node("queue_prefetch", make_queue_prefetch_node(deps, settings))
     graph.add_node("compress_memory", make_compress_memory_node(provider, deps, settings))
@@ -210,9 +232,39 @@ def build_main_workflow_graph(
         lambda s: _error_aware_route(s, "task_state"),
         {"task_state": "task_state", "classify_error": "classify_error"},
     )
-    graph.add_edge("task_state", "parallelism_gate")
+    graph.add_conditional_edges(
+        "task_state",
+        route_after_task_state,
+        {"team_plan": "team_plan", "collect_context": "collect_context"},
+    )
 
-    graph.add_edge("parallelism_gate", "collect_context")
+    # Legacy diagnostic fan-out nodes are still registered, but the main graph
+    # now uses the stable team workflow instead of parallelism_gate routing.
+    graph.add_edge("parallel_dispatch", "wait_subagents")
+    graph.add_edge("wait_subagents", "supervisor_review")
+    graph.add_conditional_edges(
+        "supervisor_review",
+        route_after_supervisor_review,
+        {
+            "spec_compliance_review": "spec_compliance_review",
+            "collect_context": "collect_context",
+            "classify_error": "classify_error",
+        },
+    )
+
+    # Lightweight team workflow: planner -> developer pool -> tester -> supervisor.
+    graph.add_edge("team_plan", "team_develop")
+    graph.add_edge("team_develop", "team_test")
+    graph.add_conditional_edges(
+        "team_test",
+        route_after_team_test,
+        {"team_develop": "team_develop", "team_supervisor": "team_supervisor"},
+    )
+    graph.add_conditional_edges(
+        "team_supervisor",
+        route_after_team_supervisor,
+        {END: END, "collect_context": "collect_context", "classify_error": "classify_error"},
+    )
 
     # Serial path
     graph.add_edge("collect_context", "inspect")
@@ -252,13 +304,18 @@ def build_main_workflow_graph(
 
     graph.add_conditional_edges(
         "respond",
-        lambda s: _error_aware_route(s, "sync_memory"),
-        {"sync_memory": "sync_memory", "classify_error": "classify_error"},
+        lambda s: _error_aware_route(s, "skill_evolution"),
+        {"skill_evolution": "skill_evolution", "classify_error": "classify_error"},
     )
 
     # Error edges from execution nodes 鈥?catch exceptions and route to classify_error
 
     # Postlude with memory conditional
+    graph.add_conditional_edges(
+        "skill_evolution",
+        lambda s: "classify_error" if _has_error(s) else (END if _is_awaiting_approval(s) else "sync_memory"),
+        {END: END, "sync_memory": "sync_memory", "classify_error": "classify_error"},
+    )
     graph.add_conditional_edges(
         "sync_memory",
         lambda s: "queue_prefetch" if (s.get("agent_state") or {}).get("memory_enabled", True) else "persist_snapshot",
@@ -320,9 +377,49 @@ def route_after_execute_tools(state: SoloGraphState) -> str:
     return "spec_compliance_review"
 
 
+def route_after_task_state(state: SoloGraphState) -> str:
+    if _team_mode_enabled(state):
+        return "team_plan"
+    return "collect_context"
+
+
 def route_after_parallelism_gate(state: SoloGraphState) -> str:
     if _is_blocked(state):
         return END
+    if (state.get("agent_state") or {}).get("execution_strategy") == "parallel":
+        return "parallel_dispatch"
+    return "collect_context"
+
+
+def route_after_team_test(state: SoloGraphState) -> str:
+    agent_data = state.get("agent_state") or {}
+    review_reports = agent_data.get("review_reports") or {}
+    snapshots = agent_data.get("snapshots") or {}
+    report = review_reports.get("team_test") or snapshots.get("team_test_report") or {}
+    if (
+        isinstance(report, dict)
+        and report.get("status") == "needs_fix"
+        and int(report.get("iteration", 0)) < int(report.get("max_iterations", 2))
+    ):
+        return "team_develop"
+    return "team_supervisor"
+
+
+def route_after_team_supervisor(state: SoloGraphState) -> str:
+    if _has_error(state):
+        return "classify_error"
+    if _is_awaiting_approval(state):
+        return END
+    return "collect_context"
+
+
+def route_after_supervisor_review(state: SoloGraphState) -> str:
+    if _has_error(state):
+        return "classify_error"
+    agent_data = state.get("agent_state") or {}
+    report = agent_data.get("supervisor_report") or {}
+    if isinstance(report, dict) and report.get("status") == "passed":
+        return "spec_compliance_review"
     return "collect_context"
 
 

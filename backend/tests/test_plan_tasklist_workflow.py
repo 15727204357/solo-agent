@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 from solo_agent.agent import AgentDeps, AgentSettings
 from solo_agent.agent.state import AgentState
 from solo_agent.context import WorkspaceTaskStore
 from solo_agent.providers import ChatMessage
 from solo_agent.tools import create_default_registry
+from solo_agent.workflow.sandbox.command_workspace import prepare_command_workspace
 from solo_agent.workflow.stages import _execute_tools_node, _task_state_stage
 
 
@@ -404,3 +407,42 @@ async def test_execute_tools_runs_task_through_sync_subagent_runner(tmp_path) ->
     assert completed.data["metadata"]["mode"] == "sync_child_agent"
     assert "Scoped finding from provider" in completed.data["result"]
     assert state.subagent_results
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_emits_sandbox_command_event_for_isolated_command_workspace(tmp_path) -> None:
+    (tmp_path / "test_demo.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    command_workspace = prepare_command_workspace(
+        tmp_path,
+        session_id="s-sandbox",
+        run_id="r-sandbox",
+        sandbox_mode="isolated",
+    )
+    settings = AgentSettings(workspace_root=tmp_path, sandbox_mode="isolated", tool_call_cut_off=2)
+    registry = create_default_registry(
+        tmp_path,
+        command_workspace_root=command_workspace.command_workspace_root,
+        sandbox_mode=command_workspace.mode,
+    )
+    state = AgentState(session_id="s-sandbox", run_id="r-sandbox", user_input="run pytest")
+    state.snapshots["proposed_tool_calls"] = [
+        {
+            "name": "run_command",
+            "arguments": {
+                "command": sys.executable,
+                "args": ["-m", "pytest", "-q"],
+                "timeout_seconds": 30,
+                "max_output_bytes": 12_000,
+            },
+        }
+    ]
+    deps = AgentDeps(tool_registry=registry, safety_inspector=registry, settings=settings)
+
+    events = await _collect(_execute_tools_node(state, deps, settings))
+    sandbox_event = next(event for event in events if event.type == "sandbox_command_executed")
+    completed = next(event for event in events if event.type == "tool_call_completed")
+
+    assert sandbox_event.data["sandbox"]["mode"] == "isolated"
+    assert completed.data["metadata"]["sandbox"]["workspace_root"] == str(command_workspace.command_workspace_root)
+    assert "<tool-results>" in state.snapshots["tool_results_block"]
+    command_workspace.cleanup()

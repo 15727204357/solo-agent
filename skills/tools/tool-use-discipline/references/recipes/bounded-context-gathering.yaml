@@ -1,0 +1,25 @@
+{
+  "id": "bounded-context-gathering",
+  "name": "Bounded context gathering",
+  "description": "Start broad once, then search narrowly with the current task terms.",
+  "when": ["inspect", "read code", "verify", "tool use", "context"],
+  "mode": "context",
+  "priority": 50,
+  "run_policy": "auto",
+  "failure_policy": "continue",
+  "steps": [
+    {
+      "id": "snapshot",
+      "tool": "workspace_snapshot",
+      "description": "Summarize workspace structure.",
+      "arguments": {"path": ".", "max_entries": 80}
+    },
+    {
+      "id": "search",
+      "tool": "search_code",
+      "description": "Search code using current task terms.",
+      "arguments": {"query": "{{user_input}}", "path": ".", "glob": "*", "regex": false, "context_lines": 0, "max_matches": 40}
+    }
+  ],
+  "success_criteria": ["The next model step has enough bounded context to decide what to read or edit."]
+}

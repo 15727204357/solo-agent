@@ -84,3 +84,20 @@ async def test_agent_state_round_trips_error_fields() -> None:
     assert restored.retry_count == 2
     assert restored.error_classification == "retryable"
     assert restored.compaction_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_state_round_trips_skill_evolution_fields() -> None:
+    state = AgentState(
+        session_id="s1",
+        run_id="r1",
+        user_input="test",
+        skill_evolution_candidates=[{"target_skill": "python-backend-change"}],
+        skill_evolution_proposal={"proposal": {"id": "skillchg_1"}},
+    )
+
+    data = agent_state_to_graph_data(state)
+    restored = agent_state_from_graph_data(data)
+
+    assert restored.skill_evolution_candidates == [{"target_skill": "python-backend-change"}]
+    assert restored.skill_evolution_proposal == {"proposal": {"id": "skillchg_1"}}

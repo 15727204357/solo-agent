@@ -5,6 +5,7 @@ category: workflow
 triggers: [review, code review, inspect changes, risks, regression]
 red_flags: [style-only review, no line references, no tests considered]
 required_tools: [workspace_snapshot, search_text, read_file, run_pytest, run_ruff_check]
+metadata: {"hermes": {"recipes": [{"id": "review-context", "file": "references/recipes/review-context.yaml"}]}}
 ---
 
 # Code Review

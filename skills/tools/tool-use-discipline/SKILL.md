@@ -5,6 +5,7 @@ category: tools
 triggers: [tool use, inspect project, read code, verify, quality check]
 red_flags: [guessing, repeated calls, too much output, unrelated files]
 required_tools: [workspace_snapshot, search_text, read_file, run_pytest, run_ruff_check]
+metadata: {"hermes": {"recipes": [{"id": "bounded-context-gathering", "file": "references/recipes/bounded-context-gathering.yaml"}]}}
 ---
 
 # Tool Use Discipline

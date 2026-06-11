@@ -11,6 +11,10 @@ from solo_agent.workflow.graphs import (
     route_after_execute_tools,
     route_after_parallelism_gate,
     route_after_patch,
+    route_after_supervisor_review,
+    route_after_task_state,
+    route_after_team_supervisor,
+    route_after_team_test,
 )
 
 
@@ -41,6 +45,9 @@ class FakeSettings:
     subagent_timeout_seconds = 900
     sandbox_mode = "local"
     run_mode = "agent"
+    skill_evolution_enabled = True
+    skill_evolution_min_confidence = 0.72
+    skill_evolution_max_proposals_per_run = 1
 
 
 class FakeProvider:
@@ -99,7 +106,7 @@ async def test_route_after_parallelism_gate_blocked_returns_end() -> None:
 @pytest.mark.asyncio
 async def test_route_after_parallelism_gate_parallel() -> None:
     state: SoloGraphState = {"agent_state": {"execution_strategy": "parallel", "blocked": False}, "events": [], "error": None}
-    assert route_after_parallelism_gate(state) == "collect_context"
+    assert route_after_parallelism_gate(state) == "parallel_dispatch"
 
 
 @pytest.mark.asyncio
@@ -118,6 +125,80 @@ async def test_route_after_execute_tools_awaiting_approval() -> None:
 async def test_route_after_execute_tools_continue() -> None:
     state: SoloGraphState = {"agent_state": {"awaiting_approval": False}, "events": [], "error": None}
     assert route_after_execute_tools(state) == "spec_compliance_review"
+
+
+@pytest.mark.asyncio
+async def test_route_after_task_state_team_mode_requires_plan_and_subagent() -> None:
+    state: SoloGraphState = {
+        "agent_state": {"run_mode": "plan", "is_plan_mode": True, "subagent_enabled": True},
+        "events": [],
+        "error": None,
+    }
+    assert route_after_task_state(state) == "team_plan"
+
+
+@pytest.mark.asyncio
+async def test_route_after_task_state_serial_without_double_switch() -> None:
+    state: SoloGraphState = {
+        "agent_state": {"run_mode": "plan", "is_plan_mode": True, "subagent_enabled": False},
+        "events": [],
+        "error": None,
+    }
+    assert route_after_task_state(state) == "collect_context"
+
+
+@pytest.mark.asyncio
+async def test_route_after_supervisor_review_passed() -> None:
+    state: SoloGraphState = {
+        "agent_state": {"supervisor_report": {"status": "passed"}},
+        "events": [],
+        "error": None,
+    }
+    assert route_after_supervisor_review(state) == "spec_compliance_review"
+
+
+@pytest.mark.asyncio
+async def test_route_after_supervisor_review_fallbacks_to_serial() -> None:
+    state: SoloGraphState = {
+        "agent_state": {"supervisor_report": {"status": "fallback_serial"}},
+        "events": [],
+        "error": None,
+    }
+    assert route_after_supervisor_review(state) == "collect_context"
+
+
+@pytest.mark.asyncio
+async def test_route_after_team_test_loops_until_max_iterations() -> None:
+    state: SoloGraphState = {
+        "agent_state": {
+            "review_reports": {
+                "team_test": {"status": "needs_fix", "iteration": 1, "max_iterations": 2},
+            },
+        },
+        "events": [],
+        "error": None,
+    }
+    assert route_after_team_test(state) == "team_develop"
+
+
+@pytest.mark.asyncio
+async def test_route_after_team_test_supervises_at_max_iterations() -> None:
+    state: SoloGraphState = {
+        "agent_state": {
+            "review_reports": {
+                "team_test": {"status": "needs_fix", "iteration": 2, "max_iterations": 2},
+            },
+        },
+        "events": [],
+        "error": None,
+    }
+    assert route_after_team_test(state) == "team_supervisor"
+
+
+@pytest.mark.asyncio
+async def test_route_after_team_supervisor_awaiting_approval_ends() -> None:
+    state: SoloGraphState = {"agent_state": {"awaiting_approval": True}, "events": [], "error": None}
+    assert route_after_team_supervisor(state) == END
 
 
 @pytest.mark.asyncio
@@ -165,6 +246,7 @@ async def test_graph_contains_error_recovery_nodes() -> None:
     assert "classify_error" in node_names
     assert "recovery_action" in node_names
     assert "repetition_guard" in node_names
+    assert "skill_evolution" in node_names
 
 
 @pytest.mark.asyncio
@@ -180,10 +262,21 @@ async def test_graph_uses_single_main_plan_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_does_not_register_graph_level_subagent_nodes() -> None:
+async def test_graph_registers_graph_level_subagent_nodes() -> None:
     graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
     node_names = set(graph.nodes.keys())
 
-    assert "parallel_dispatch" not in node_names
-    assert "wait_subagents" not in node_names
-    assert "supervisor_review" not in node_names
+    assert "parallel_dispatch" in node_names
+    assert "wait_subagents" in node_names
+    assert "supervisor_review" in node_names
+
+
+@pytest.mark.asyncio
+async def test_graph_registers_lightweight_team_nodes() -> None:
+    graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
+    node_names = set(graph.nodes.keys())
+
+    assert "team_plan" in node_names
+    assert "team_develop" in node_names
+    assert "team_test" in node_names
+    assert "team_supervisor" in node_names

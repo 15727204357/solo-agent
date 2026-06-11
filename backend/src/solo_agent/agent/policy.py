@@ -44,14 +44,24 @@ IRON_LAW_WARNING_MARKERS = (
     "仅查看",
     "不要修改",
 )
-QUALITY_TOOL_NAMES = {"run_pytest", "targeted_pytest", "run_ruff_check", "run_ruff_format_check"}
+QUALITY_TOOL_NAMES = {"run_command", "run_pytest", "targeted_pytest", "run_ruff_check", "run_ruff_format_check"}
 EDIT_PROOF_TOOL_NAMES = {"prepare_edit", "get_file_hash"}
 EDIT_TOOL_NAMES = {"prepare_edit", "preview_patch", "apply_text_edit"}
-CONTEXT_PROOF_TOOL_NAMES = {"workspace_snapshot", "search_text", "read_file", "inspect_python_symbols"}
+CONTEXT_PROOF_TOOL_NAMES = {
+    "workspace_snapshot",
+    "find_files",
+    "search_code",
+    "search_text",
+    "read_file",
+    "inspect_python_symbols",
+}
 
 
 class BehaviorPolicy:
-    """Graph 层行为策略：skill 是输入，硬约束和恢复由这里执行。"""
+    """Graph-level behavior policy.
+
+    Skills are inputs; hard gates and recovery are enforced here.
+    """
 
     def __init__(self) -> None:
         self._default_error_classifier = ErrorClassifier()
@@ -77,9 +87,7 @@ class BehaviorPolicy:
                 "read_before_edit",
             ],
             "selected_behavior_skills": [
-                skill
-                for skill in getattr(state, "selected_skills", [])
-                if str(skill.get("category", "")).lower() == "behavior"
+                skill for skill in getattr(state, "selected_skills", []) if str(skill.get("category", "")).lower() == "behavior"
             ],
             "hard_gates": {
                 "production_edit_requires_failing_test_signal": "iron-law" in skills,
@@ -263,7 +271,7 @@ class BehaviorPolicy:
             protocol_state.setdefault("previews", set()).add(key)
 
     # ------------------------------------------------------------------
-    # 错误恢复策略方法（Error Handling Layer）
+    # Error recovery policy methods.
     # ------------------------------------------------------------------
 
     def classify_error(
@@ -273,12 +281,8 @@ class BehaviorPolicy:
         attempt_count: int = 0,
         run_id: str | None = None,
     ) -> ErrorClassification:
-        """委托给 ErrorClassifier 进行错误分类。
+        """Delegate exception classification to ErrorClassifier."""
 
-        :param exception: 捕获的异常
-        :param stage: 失败发生的 agent 阶段
-        :param attempt_count: 当前已尝试次数
-        """
         if run_id:
             classifier = self._run_error_classifiers.setdefault(run_id, ErrorClassifier())
         else:
@@ -290,19 +294,11 @@ class BehaviorPolicy:
         classification: ErrorClassification,
         retry_count: int,
     ) -> tuple[bool, str]:
-        """判断是否应重试。
+        """Decide whether a classified error should be retried."""
 
-        :param classification: ErrorClassifier 返回的分类结果
-        :param retry_count: 当前已重试次数
-        :returns: (是否应重试, 决策理由)
-        """
         if classification.category == "retryable" and retry_count < 3:
             return True, "可重试的临时错误"
-        if (
-            classification.category == "fixable"
-            and classification.recovery_stage
-            and retry_count < 2
-        ):
+        if classification.category == "fixable" and classification.recovery_stage and retry_count < 2:
             return True, f"可修复错误，恢复阶段: {classification.recovery_stage}"
         if classification.category == "architectural":
             return False, "三次相同失败，判定为架构问题"
@@ -311,21 +307,12 @@ class BehaviorPolicy:
         return False, f"重试次数已达上限 (retry_count={retry_count})"
 
     def build_fix_prompt(self, classification: ErrorClassification) -> str:
-        """根据错误分类生成修复提示文本，注入到对话上下文中。
+        """Build a short recovery hint to inject into runtime context."""
 
-        :param classification: ErrorClassifier 返回的分类结果
-        :returns: 修复提示文本（可能为空字符串）
-        """
         if classification.recovery_stage == "collect_context":
-            return (
-                "[修复提示] 工具调用失败：缺少文件上下文。"
-                "请先使用 read_file 或 search_text 收集相关代码内容，再尝试编辑。"
-            )
+            return "[修复提示] 工具调用失败：缺少文件上下文。请先使用 read_file 或 search_code 收集相关代码内容，再尝试编辑。"
         if classification.recovery_stage == "fix_conversation":
-            return (
-                "[修复提示] LLM 消息格式错误。"
-                "请确保工具调用参数格式正确，避免空内容或无效 role 组合。"
-            )
+            return "[修复提示] LLM 消息格式错误。请确保工具调用参数格式正确，避免空内容或无效 role 组合。"
         if classification.recovery_stage == "hash_anchored_editing":
             return (
                 "[修复提示] 编辑协议失败：缺少文件哈希或预览。"

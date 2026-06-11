@@ -1,0 +1,25 @@
+{
+  "id": "inspect",
+  "name": "Inspect Python backend context",
+  "description": "Collect bounded backend structure and locate relevant Python code before editing.",
+  "when": ["python", "backend", "fastapi", "pytest", "agent graph", "repository", "api route"],
+  "mode": "context",
+  "priority": 90,
+  "run_policy": "auto",
+  "failure_policy": "continue",
+  "steps": [
+    {
+      "id": "snapshot",
+      "tool": "workspace_snapshot",
+      "description": "Summarize workspace shape before narrowing.",
+      "arguments": {"path": ".", "max_entries": 80}
+    },
+    {
+      "id": "search",
+      "tool": "search_code",
+      "description": "Search backend code for task terms.",
+      "arguments": {"query": "{{user_input}}", "path": "backend/src", "glob": "*.py", "regex": false, "context_lines": 1, "max_matches": 30}
+    }
+  ],
+  "success_criteria": ["Relevant backend files or symbols are identified before any edit."]
+}

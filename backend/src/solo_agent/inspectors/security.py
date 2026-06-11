@@ -12,9 +12,9 @@ from .base import InspectionResult, ToolCall
 class SecurityInspector:
     """Block obviously dangerous local actions and secret exfiltration.
 
-    The first milestone is read-only, so these checks are intentionally simple
-    and conservative. They are meant to catch unsafe intent before any tool is
-    executed.
+    These checks are intentionally conservative. The registry owns the full
+    tool contract, while this inspector blocks dangerous text, secret exposure,
+    and unknown ad hoc tool calls before execution.
     """
 
     _dangerous_delete_patterns = (
@@ -58,7 +58,7 @@ class SecurityInspector:
         for pattern in self._write_intent_patterns:
             if pattern.search(normalized):
                 return InspectionResult.block(
-                    "Milestone 1 only permits read-only operations.",
+                    "Write-like operations must go through registered guarded tools.",
                     code="write_not_allowed",
                     metadata={"pattern": pattern.pattern},
                 )
@@ -67,9 +67,52 @@ class SecurityInspector:
 
     def inspect_tool_call(self, call: ToolCall) -> InspectionResult:
         tool_name = call.name.strip()
-        if tool_name not in {"list_files", "read_file", "search_text"}:
+        allowed_tools = {
+            "workspace_snapshot",
+            "find_files",
+            "list_files",
+            "read_file",
+            "search_code",
+            "search_text",
+            "get_file_hash",
+            "inspect_python_symbols",
+            "code_map",
+            "find_references",
+            "analyze_impact",
+            "semantic_code_search",
+            "prepare_edit",
+            "preview_patch",
+            "apply_text_edit",
+            "create_file",
+            "mkdir",
+            "move_path",
+            "delete_path",
+            "run_command",
+            "run_pytest",
+            "run_ruff_check",
+            "run_ruff_format_check",
+            "targeted_pytest",
+            "read_test_failure",
+            "git_status",
+            "git_diff",
+            "git_show",
+            "git_recent_changes",
+            "skills_list",
+            "skill_view",
+            "skill_manage",
+            "skill_recipe_list",
+            "skill_recipe_view",
+            "skill_recipe_preview",
+            "skill_recipe_run",
+            "list_skills",
+            "load_skill",
+            "select_relevant_skills",
+            "write_todos",
+            "task",
+        }
+        if tool_name not in allowed_tools:
             return InspectionResult.block(
-                f"Tool '{tool_name}' is not allowed in read-only milestone.",
+                f"Tool '{tool_name}' is not registered in the guarded tool layer.",
                 code="tool_not_allowed",
                 metadata={"tool": tool_name},
             )

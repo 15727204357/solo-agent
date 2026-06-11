@@ -18,6 +18,7 @@ from solo_agent.workflow.stages import (
     _execute_tools_node,
     _inspect_node,
     _load_builtin_memory_stage,
+    _parallel_dispatch_stage,
     _parallelism_gate_stage,
     _persist_snapshot_stage,
     _plan_node,
@@ -29,10 +30,17 @@ from solo_agent.workflow.stages import (
     _respond_node,
     _select_tools_node,
     _skill_context_stage,
+    _skill_evolution_stage,
     _skip_memory_stage,
     _subdirectory_hint_stage,
+    _supervisor_review_stage,
     _sync_memory_stage,
     _task_state_stage,
+    _team_develop_stage,
+    _team_plan_stage,
+    _team_supervisor_stage,
+    _team_test_stage,
+    _wait_subagents_stage,
 )
 
 StageKwArgs = dict[str, Any]
@@ -121,6 +129,34 @@ def make_parallelism_gate_node(settings: Any):
     return _make_node(_parallelism_gate_stage, settings)
 
 
+def make_parallel_dispatch_node(settings: Any):
+    return _make_node(_parallel_dispatch_stage, settings)
+
+
+def make_wait_subagents_node(provider: Any, deps: Any, settings: Any):
+    return _make_node(_wait_subagents_stage, provider, deps, settings)
+
+
+def make_supervisor_review_node(settings: Any):
+    return _make_node(_supervisor_review_stage, settings)
+
+
+def make_team_plan_node(settings: Any):
+    return _make_node(_team_plan_stage, settings)
+
+
+def make_team_develop_node(provider: Any, deps: Any, settings: Any):
+    return _make_node(_team_develop_stage, provider, deps, settings)
+
+
+def make_team_test_node(deps: Any, settings: Any):
+    return _make_node(_team_test_stage, deps, settings)
+
+
+def make_team_supervisor_node(deps: Any, settings: Any):
+    return _make_node(_team_supervisor_stage, deps, settings)
+
+
 def make_collect_context_node(deps: Any, settings: Any):
     return _make_node(_collect_context_node, deps, settings)
 
@@ -147,6 +183,10 @@ def make_subdirectory_hint_node(settings: Any):
 
 def make_respond_node(provider: Any, settings: Any):
     return _make_node(_respond_node, provider, settings)
+
+
+def make_skill_evolution_node(deps: Any, settings: Any):
+    return _make_node(_skill_evolution_stage, deps, settings)
 
 
 def make_sync_memory_node(deps: Any):

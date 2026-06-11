@@ -7,6 +7,7 @@ import solo_agent.web.runner as runner_module
 from fastapi.testclient import TestClient
 from solo_agent.agent.events import AgentEvent
 from solo_agent.settings import Settings
+from solo_agent.skill_changes import SkillChangeOperation, SkillChangeProposal
 from solo_agent.verified_editing import PatchEdit, PatchProposal
 from solo_agent.web.app import create_app
 from solo_agent.web.routes import get_repository, get_runner
@@ -99,6 +100,29 @@ def test_web_api_patch_approve_applies_and_verifies(monkeypatch) -> None:
     assert asyncio.run(repo.get_run(session_id, run["id"])).status == "completed"
 
 
+def test_web_api_skill_change_approve_applies_to_workspace(tmp_path) -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+    app.dependency_overrides[routes_module.get_settings] = lambda: Settings(workspace_root=tmp_path)
+
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions", json={"title": "Demo"}).json()["id"]
+        run = client.post(f"/api/sessions/{session_id}/runs", json={"prompt": "save workflow"}).json()
+        proposal = _skill_change(session_id, run["id"])
+        asyncio.run(repo.create_skill_change_proposal(proposal))
+        listed = client.get(f"/api/sessions/{session_id}/runs/{run['id']}/skill-changes")
+        approved = client.post(f"/api/sessions/{session_id}/runs/{run['id']}/skill-changes/{proposal.id}/approve")
+
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == proposal.id
+    assert approved.status_code == 200
+    assert approved.json()["ok"] is True
+    assert (tmp_path / "skills" / "workflows" / "new-flow" / "SKILL.md").read_text(encoding="utf-8").startswith("---")
+    assert asyncio.run(repo.get_run(session_id, run["id"])).status == "completed"
+
+
 def test_web_api_cancel_running_run_marks_cancelled_and_stream_closes() -> None:
     app = create_app()
     repo = InMemorySessionRepository()
@@ -140,6 +164,104 @@ def test_web_api_cancel_completed_run_is_idempotent() -> None:
 
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "completed"
+
+
+def test_web_api_interrupt_marks_paused_or_awaiting_feedback() -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+
+    async def setup() -> tuple[str, str]:
+        session = await repo.create_session("Interrupt", None)
+        run = await repo.create_run(session.id, "long team task")
+        await repo.mark_run_status(session.id, run.id, "running")
+        return session.id, run.id
+
+    session_id, run_id = asyncio.run(setup())
+    with TestClient(app) as client:
+        paused = client.post(f"/api/sessions/{session_id}/runs/{run_id}/interrupt", json={"reason": "pause"})
+        await_feedback = client.post(
+            f"/api/sessions/{session_id}/runs/{run_id}/interrupt",
+            json={"feedback": {"message": "retry from tests"}},
+        )
+
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "paused"
+    assert await_feedback.status_code == 200
+    assert await_feedback.json()["status"] == "awaiting_feedback"
+    events = asyncio.run(repo.list_run_events(session_id, run_id))
+    assert [event.type for event in events].count("run_interrupted") == 2
+
+
+def test_web_api_artifacts_and_resume_use_checkpoint_state(monkeypatch, tmp_path) -> None:
+    app = create_app()
+    repo = InMemorySessionRepository()
+    captured: dict[str, object] = {}
+    settings = Settings(workspace_root=tmp_path, provider="ollama", model="fake-model")
+    app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_runner] = lambda: FakeRunner(repo)
+    app.dependency_overrides[routes_module.get_settings] = lambda: settings
+
+    async def fake_run_agent_events(
+        session_id,
+        run_id,
+        user_input,
+        deps=None,
+        settings=None,
+        initial_state=None,
+        resume_from_node=None,
+    ):
+        captured["initial_state"] = initial_state
+        captured["resume_from_node"] = resume_from_node
+        captured["settings"] = settings
+        captured["registry_root"] = getattr(deps.tool_registry, "command_workspace_root", None)
+        yield AgentEvent(type="run_completed", session_id=session_id, run_id=run_id, node="workflow", data={})
+
+    monkeypatch.setattr(routes_module, "run_agent_events", fake_run_agent_events)
+
+    async def setup() -> tuple[str, str]:
+        session = await repo.create_session("Resume", None)
+        run = await repo.create_run(session.id, "fix code", metadata={"run_mode": "agent"})
+        state_snapshot = {
+            "user_input": "fix code",
+            "sandbox_artifacts": {
+                "sandbox_root": str(tmp_path / ".tmp" / "runs" / "run-1"),
+                "diff": "--- a/pkg/app.py\n+++ b/pkg/app.py\n",
+                "tool_ledger": [{"tool": "apply_text_edit", "ok": True}],
+            },
+            "code_map_summary": {"python_file_count": 1},
+            "impact_analysis": {"related_tests": ["tests/test_app.py"]},
+        }
+        await repo.append_event(
+            session.id,
+            run.id,
+            "persist_snapshot_completed",
+            "snapshot",
+            {"data": {"snapshot": {"loop_stage": "team_test", "state_snapshot": state_snapshot}}},
+        )
+        await repo.mark_run_status(session.id, run.id, "paused")
+        return session.id, run.id
+
+    session_id, run_id = asyncio.run(setup())
+    with TestClient(app) as client:
+        artifacts = client.get(f"/api/sessions/{session_id}/runs/{run_id}/artifacts")
+        resumed = client.post(
+            f"/api/sessions/{session_id}/runs/{run_id}/resume",
+            json={
+                "checkpoint_id": "event:1",
+                "from_node": "team_test",
+                "human_feedback": {"message": "pytest failed; fix assertion"},
+            },
+        )
+
+    assert artifacts.status_code == 200
+    assert artifacts.json()["sandbox_artifacts"]["tool_ledger"][0]["tool"] == "apply_text_edit"
+    assert artifacts.json()["impact_analysis"]["related_tests"] == ["tests/test_app.py"]
+    assert resumed.status_code == 200
+    assert captured["resume_from_node"] == "team_test"
+    assert captured["initial_state"]["sandbox_artifacts"]["diff"].startswith("--- a/pkg/app.py")
+    assert captured["settings"].human_feedback == {"message": "pytest failed; fix assertion"}
 
 
 def test_web_api_memory_inbox_approve_reject_and_revoke() -> None:
@@ -233,6 +355,25 @@ def _proposal(session_id: str, run_id: str) -> PatchProposal:
                 old_text="old",
                 new_text="new",
                 diff="--- app.py\n+++ app.py\n@@\n-old\n+new",
+            )
+        ],
+    )
+
+
+def _skill_change(session_id: str, run_id: str) -> SkillChangeProposal:
+    return SkillChangeProposal(
+        id="skillchg_test",
+        session_id=session_id,
+        run_id=run_id,
+        action="create",
+        skill_name="new-flow",
+        target_paths=["workflows/new-flow/SKILL.md"],
+        diff="--- /dev/null\n+++ b/skills/workflows/new-flow/SKILL.md\n",
+        operations=[
+            SkillChangeOperation(
+                action="create",
+                path="workflows/new-flow/SKILL.md",
+                content="---\nname: new-flow\n---\n# New Flow\n",
             )
         ],
     )
@@ -429,7 +570,50 @@ def test_agent_runner_passes_workflow_settings(monkeypatch, tmp_path) -> None:
     assert agent_settings.subagent_timeout_seconds == 120
     assert agent_settings.sandbox_mode == "local"
     assert agent_settings.workflow_runtime_root == ".tmp/runs"
-    assert captured["registry_kwargs"] == {"is_plan_mode": False, "subagent_enabled": False}
+    assert captured["registry_kwargs"] == {
+        "is_plan_mode": False,
+        "subagent_enabled": False,
+        "codeintel_max_files": 2_000,
+        "codeintel_max_file_bytes": 512_000,
+        "codeintel_index_ttl_seconds": 30,
+    }
+
+
+def test_agent_runner_retains_sandbox_when_feedback_pauses_run(monkeypatch, tmp_path) -> None:
+    repo = InMemorySessionRepository()
+    (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    settings = Settings(
+        workspace_root=tmp_path,
+        sandbox_mode="isolated",
+        workflow_runtime_root=".tmp/runs",
+        provider="ollama",
+        model="fake-model",
+    )
+
+    class FakeProvider:
+        name = "fake"
+        model = "fake"
+
+    async def fake_run_agent_events(session_id, run_id, user_input, deps=None, settings=None):
+        await repo.mark_run_status(session_id, run_id, "awaiting_feedback")
+        yield AgentEvent(type="team_tester_completed", session_id=session_id, run_id=run_id, node="team_test", data={})
+
+    monkeypatch.setattr(runner_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runner_module, "create_provider_from_settings", lambda agent_settings: FakeProvider())
+    monkeypatch.setattr(runner_module, "run_agent_events", fake_run_agent_events)
+
+    async def run() -> tuple[str, str]:
+        session = await repo.create_session("Runner", None)
+        created = await repo.create_run(session.id, "fix app.py", metadata={"run_mode": "plan"})
+        await AgentRunner(repo).run(session.id, created.id)
+        return session.id, created.id
+
+    session_id, run_id = asyncio.run(run())
+    events = asyncio.run(repo.list_run_events(session_id, run_id))
+
+    assert asyncio.run(repo.get_run(session_id, run_id)).status == "awaiting_feedback"
+    assert any(event.type == "sandbox_created" for event in events)
+    assert any(event.type == "sandbox_retained" for event in events)
 
 
 def test_agent_runner_exposes_task_for_plan_auto(monkeypatch, tmp_path) -> None:
@@ -469,7 +653,10 @@ def test_agent_runner_exposes_task_for_plan_auto(monkeypatch, tmp_path) -> None:
     assert agent_settings.run_mode == "plan"
     assert agent_settings.subagent_policy == "auto"
     assert agent_settings.subagent_enabled is True
-    assert captured["registry_kwargs"] == {"is_plan_mode": True, "subagent_enabled": True}
+    assert captured["registry_kwargs"]["is_plan_mode"] is True
+    assert captured["registry_kwargs"]["subagent_enabled"] is True
+    assert captured["registry_kwargs"]["command_workspace_root"]
+    assert captured["registry_kwargs"]["sandbox_network_policy"] == "deny"
 
 
 def test_agent_runner_hides_task_for_plan_off(monkeypatch, tmp_path) -> None:
@@ -509,4 +696,7 @@ def test_agent_runner_hides_task_for_plan_off(monkeypatch, tmp_path) -> None:
     assert agent_settings.run_mode == "plan"
     assert agent_settings.subagent_policy == "off"
     assert agent_settings.subagent_enabled is False
-    assert captured["registry_kwargs"] == {"is_plan_mode": True, "subagent_enabled": False}
+    assert captured["registry_kwargs"]["is_plan_mode"] is True
+    assert captured["registry_kwargs"]["subagent_enabled"] is False
+    assert captured["registry_kwargs"]["command_workspace_root"]
+    assert captured["registry_kwargs"]["sandbox_network_policy"] == "deny"

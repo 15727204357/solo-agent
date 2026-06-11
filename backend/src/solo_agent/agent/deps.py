@@ -18,9 +18,9 @@ class AgentSettings:
     temperature: float = 0.2
     plan_max_tokens: int = 500
     response_max_tokens: int = 1400
-    max_tool_calls: int = 3
-    tool_call_cut_off: int = 3
-    tool_output_max_bytes: int = 12_000
+    max_tool_calls: int = 8
+    tool_call_cut_off: int = 8
+    tool_output_max_bytes: int = 24_000
     context_file_limit: int = 80
     context_search_limit: int = 20
     history_message_limit: int = 12
@@ -40,14 +40,38 @@ class AgentSettings:
     verified_editing_enabled: bool = False
     patch_max_tokens: int = 1400
     run_mode: str = "agent"
+    tool_loop_mode: str = "heuristic"
+    approval_mode: str = "confirm"
+    workspace_backend: str = "copy"
+    eval_suite_id: str | None = None
     is_plan_mode: bool = False
     subagent_policy: str = "off"
     subagent_enabled: bool = False
     plan_deep_max_tokens: int = 6000
     max_concurrent_subagents: int = 3
     subagent_timeout_seconds: int = 900
-    sandbox_mode: str = "local"
+    sandbox_mode: str = "auto"
+    sandbox_retain_on_failure: bool = True
+    sandbox_network_policy: str = "deny"
+    sandbox_command_timeout_seconds: int = 60
+    sandbox_max_output_bytes: int = 32_000
+    sandbox_max_commands_per_run: int = 50
+    sandbox_max_changed_files: int = 200
+    sandbox_max_workspace_bytes: int = 512_000_000
+    codeintel_max_files: int = 2_000
+    codeintel_max_file_bytes: int = 512_000
+    codeintel_index_ttl_seconds: int = 30
+    outcome_judge_enabled: bool = True
+    outcome_judge_provider_mode: str = "rules"
+    eval_runtime_root: str | Path = ".solo-agent/evals"
+    git_artifacts_enabled: bool = True
     workflow_runtime_root: str | Path = ".solo-agent/runs"
+    resume_from_node: str | None = None
+    recovery_hints: dict[str, Any] = field(default_factory=dict)
+    human_feedback: dict[str, Any] = field(default_factory=dict)
+    skill_evolution_enabled: bool = True
+    skill_evolution_min_confidence: float = 0.72
+    skill_evolution_max_proposals_per_run: int = 1
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
 

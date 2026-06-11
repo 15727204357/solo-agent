@@ -5,6 +5,7 @@ category: tools
 triggers: [edit file, modify code, patch, write code, refactor]
 red_flags: [line number only, stale context, direct write, no preview]
 required_tools: [get_file_hash, prepare_edit, preview_patch, apply_text_edit]
+metadata: {"hermes": {"recipes": [{"id": "manual-hash-edit", "file": "references/recipes/manual-hash-edit.yaml"}]}}
 ---
 
 # Hash-Anchored Editing

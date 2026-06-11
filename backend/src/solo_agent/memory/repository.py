@@ -22,6 +22,7 @@ from .models import (
     RunStatus,
     SessionRecord,
     SessionType,
+    SkillChangeProposalRecord,
     SnapshotRecord,
     SnapshotType,
     TimingPointRecord,
@@ -809,6 +810,93 @@ class SQLiteMemoryRepository:
                 record.apply_results = apply_results
             if verification is not None:
                 record.verification = verification
+            record.error = error
+            record.updated_at = now
+            if decided:
+                record.decided_at = now
+            await self._touch_session(session, record.session_id, now)
+            await session.commit()
+            return record
+
+    async def create_skill_change_proposal(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+        action: str = "",
+        skill_name: str = "",
+        target_paths: list[str] | None = None,
+        diff: str = "",
+        operations: list[dict[str, Any]] | None = None,
+        status: str = "pending",
+        proposal: Any | None = None,
+    ) -> SkillChangeProposalRecord:
+        if proposal is not None:
+            session_id = proposal.session_id
+            run_id = proposal.run_id
+            proposal_id = proposal.id
+            action = proposal.action
+            skill_name = proposal.skill_name
+            target_paths = list(proposal.target_paths)
+            diff = proposal.diff
+            operations = [operation.model_dump(mode="json") for operation in proposal.operations]
+            status = proposal.status
+        if session_id is None or run_id is None or proposal_id is None:
+            raise ValueError("session_id, run_id, and proposal_id are required")
+        now = utc_now()
+        record = SkillChangeProposalRecord(
+            id=proposal_id,
+            session_id=session_id,
+            run_id=run_id,
+            status=status,
+            action=action,
+            skill_name=skill_name,
+            target_paths=target_paths or [],
+            diff=diff,
+            operations=operations or [],
+            apply_results=[],
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._session_factory() as session:
+            session.add(record)
+            await self._touch_session(session, session_id, now)
+            await session.commit()
+            return record
+
+    async def list_skill_change_proposals(self, *, session_id: str, run_id: str) -> Sequence[SkillChangeProposalRecord]:
+        statement = (
+            select(SkillChangeProposalRecord)
+            .where(SkillChangeProposalRecord.session_id == session_id, SkillChangeProposalRecord.run_id == run_id)
+            .order_by(SkillChangeProposalRecord.created_at.desc())
+        )
+        async with self._session_factory() as session:
+            result = await session.scalars(statement)
+            return result.all()
+
+    async def get_skill_change_proposal(self, proposal_id: str) -> SkillChangeProposalRecord | None:
+        async with self._session_factory() as session:
+            return await session.get(SkillChangeProposalRecord, proposal_id)
+
+    async def update_skill_change_proposal(
+        self,
+        *,
+        proposal_id: str,
+        status: str | None = None,
+        apply_results: list[dict[str, Any]] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> SkillChangeProposalRecord | None:
+        now = utc_now()
+        async with self._session_factory() as session:
+            record = await session.get(SkillChangeProposalRecord, proposal_id)
+            if record is None:
+                return None
+            if status is not None:
+                record.status = status
+            if apply_results is not None:
+                record.apply_results = apply_results
             record.error = error
             record.updated_at = now
             if decided:

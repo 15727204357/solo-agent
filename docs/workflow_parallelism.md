@@ -1,79 +1,55 @@
 # Workflow Parallelism Gate
 
-Solo Agent 仅在所有四个独立性条件全部通过时才允许并行开发。这是由确定性 Python 代码做出的安全决策，不依赖 LLM 判断。
+The old parallelism gate is now a legacy diagnostic helper, not the primary
+subagent orchestration path.
 
-## Reference
+## Current Product Rule
 
-本设计遵循 `obra/superpowers` 的保守原则：
+Multi-agent execution is enabled only when both conditions are true:
 
-- `dispatching-parallel-agents`：一个独立问题域一个子代理；不并行化相关问题或共享状态工作
-- `subagent-driven-development`：每个任务独立子代理，两阶段审查
-- `writing-plans`：精确文件路径、精确验证命令、无占位符
+- `run_mode=plan`
+- `subagent_enabled=true`
 
-## Runtime Rule
-
-所有条件通过：
-
-1. Problem-domain independence — 问题域独立性
-2. Context independence — 上下文独立性
-3. Write-set independence — 写入集独立性
-4. Verification independence — 验证独立性
-
-则：
+When enabled, the graph follows the fixed team workflow:
 
 ```text
-execution_strategy = "parallel"
+team_plan -> team_develop -> team_test -> team_supervisor
 ```
 
-任一条件失败或证据缺失：
+The previous `parallelism_gate -> parallel_dispatch -> wait_subagents` path is
+kept for internal experiments and regression tests, but the main graph does not
+route through it.
 
-```text
-execution_strategy = "serial"
-```
+## Legacy Gate Semantics
 
-## 为什么故障即关 (fail-closed)？
+The helper still evaluates whether structured task metadata is safe to split:
 
-并行 Agent 开发在任务共享文件、隐式状态、测试目标或根因时是危险的。因此系统要求明确的结构化证据。如果规划器无法提供元数据，运行时默认串行。
+- problem-domain independence;
+- context independence;
+- write-set independence;
+- verification independence.
 
-## 结构化 Plan 元数据
+This remains useful as a diagnostic signal, but the resume-project demo favors
+the stable team workflow over arbitrary model-selected subagent topology.
 
-规划器可在 plan 中包含以下 JSON 块：
+## Team Workflow Events
 
-```json
-{
-  "parallel_tasks": [
-    {
-      "id": "T1",
-      "title": "Provider tests",
-      "domain": "providers",
-      "description": "Add provider config tests",
-      "read_paths": ["backend/src/solo_agent/providers/"],
-      "write_paths": ["backend/tests/test_provider_config.py"],
-      "verify_commands": ["pytest backend/tests/test_provider_config.py -q"],
-      "depends_on": [],
-      "needs_global_context": false,
-      "risk_flags": []
-    }
-  ]
-}
-```
+The active team path emits:
 
-## 事件流
+- `team_plan_started`
+- `team_plan_completed`
+- `team_developer_started`
+- `team_developer_completed`
+- `team_tester_started`
+- `team_tester_completed`
+- `team_supervisor_started`
+- `team_supervisor_completed`
+- `patch_proposed`
+- `patch_approval_required`
 
-工作流发出以下 SSE 事件：
+## Scope
 
-- `parallelism_gate_started`
-- `parallelism_gate_completed`
-
-完成事件负载包含：
-
-- `mode`: `parallel` 或 `serial`
-- `allowed`: boolean
-- `conditions`: 四个条件判定
-- `conflicts`: 串行回退的原因
-- `groups`: 并行组或串行任务顺序
-- `tasks`: 标准化的任务候选
-
-## 当前范围
-
-本次变更仅落地确定性安全闸门。不包含完整 DAG 调度器、分支/worktree 隔离、或自动补丁集成。应在本闸门稳定测试后再构建后续能力。
+Developer subagents can produce real code changes, but only inside the isolated
+command workspace. The supervisor converts the final sandbox result into the
+existing verified editing patch proposal for the main workspace, so applying
+changes still requires explicit approval.

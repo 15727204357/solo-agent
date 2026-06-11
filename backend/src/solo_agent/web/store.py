@@ -10,11 +10,12 @@ from pathlib import Path
 
 from solo_agent.memory import SQLiteMemoryRepository, init_sqlite_memory
 from solo_agent.memory.models import MessageRole, RunStatus
+from solo_agent.skill_changes import SkillChangeProposal
 from solo_agent.verified_editing import PatchProposal
 from solo_agent.web.models import RunEvent, RunRecord, SessionRecord, new_id, utc_now
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
-RUN_STATUSES = {*TERMINAL_STATUSES, "running", "queued", "awaiting_approval"}
+RUN_STATUSES = {*TERMINAL_STATUSES, "running", "queued", "paused", "awaiting_approval", "awaiting_feedback"}
 
 
 class SessionRepository(ABC):
@@ -77,6 +78,33 @@ class SessionRepository(ABC):
         error: str | None = None,
         decided: bool = False,
     ) -> PatchProposal | None:
+        raise NotImplementedError
+
+    async def create_skill_change_proposal(self, proposal: SkillChangeProposal) -> SkillChangeProposal:
+        raise NotImplementedError
+
+    async def list_skill_change_proposals(self, session_id: str, run_id: str) -> list[SkillChangeProposal]:
+        raise NotImplementedError
+
+    async def get_skill_change_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        proposal_id: str,
+    ) -> SkillChangeProposal | None:
+        raise NotImplementedError
+
+    async def update_skill_change_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        proposal_id: str,
+        *,
+        status: str | None = None,
+        apply_results: list[dict[str, object]] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> SkillChangeProposal | None:
         raise NotImplementedError
 
     async def list_memory_candidates(
@@ -175,8 +203,11 @@ class InMemorySessionRepository(SessionRepository):
         self._messages: dict[str, list[dict[str, object]]] = defaultdict(list)
         self._patches: dict[str, PatchProposal] = {}
         self._run_patches: dict[str, list[str]] = defaultdict(list)
+        self._skill_changes: dict[str, SkillChangeProposal] = {}
+        self._run_skill_changes: dict[str, list[str]] = defaultdict(list)
         self._memory_candidates: dict[str, dict[str, object]] = {}
         self._memory_entries: dict[str, dict[str, object]] = {}
+        self._graph_snapshots: dict[str, list[dict[str, object]]] = defaultdict(list)
 
     async def create_session(self, title: str, workspace_path: str | None) -> SessionRecord:
         async with self._lock:
@@ -293,6 +324,64 @@ class InMemorySessionRepository(SessionRepository):
             )
             proposal = PatchProposal.model_validate(payload)
             self._patches[patch_id] = proposal
+            return proposal
+
+    async def create_skill_change_proposal(self, proposal: SkillChangeProposal) -> SkillChangeProposal:
+        async with self._lock:
+            self._skill_changes[proposal.id] = proposal
+            self._run_skill_changes[proposal.run_id].append(proposal.id)
+            if proposal.session_id in self._sessions:
+                self._sessions[proposal.session_id].updated_at = utc_now()
+            return proposal
+
+    async def list_skill_change_proposals(self, session_id: str, run_id: str) -> list[SkillChangeProposal]:
+        async with self._lock:
+            return [
+                self._skill_changes[proposal_id]
+                for proposal_id in self._run_skill_changes.get(run_id, [])
+                if proposal_id in self._skill_changes and self._skill_changes[proposal_id].session_id == session_id
+            ]
+
+    async def get_skill_change_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        proposal_id: str,
+    ) -> SkillChangeProposal | None:
+        async with self._lock:
+            proposal = self._skill_changes.get(proposal_id)
+            if proposal is None or proposal.session_id != session_id or proposal.run_id != run_id:
+                return None
+            return proposal
+
+    async def update_skill_change_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        proposal_id: str,
+        *,
+        status: str | None = None,
+        apply_results: list[dict[str, object]] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> SkillChangeProposal | None:
+        del decided
+        async with self._lock:
+            proposal = self._skill_changes.get(proposal_id)
+            if proposal is None or proposal.session_id != session_id or proposal.run_id != run_id:
+                return None
+            proposal = proposal.model_copy(
+                update={
+                    key: value
+                    for key, value in {
+                        "status": status,
+                        "apply_results": apply_results,
+                        "error": error,
+                    }.items()
+                    if value is not None
+                }
+            )
+            self._skill_changes[proposal_id] = proposal
             return proposal
 
     async def list_memory_candidates(
@@ -430,6 +519,37 @@ class InMemorySessionRepository(SessionRepository):
             if session_id in self._sessions:
                 self._sessions[session_id].updated_at = now
 
+    async def list_checkpoints(self, session_id: str, run_id: str) -> list[dict[str, object]]:
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.session_id != session_id:
+                return []
+            return [
+                {
+                    "checkpoint_id": str(item.get("checkpoint_id", "")),
+                    "node_name": str(item.get("node_name", "")),
+                    "step_number": int(item.get("step_number", 0)),
+                    "created_at": str(item.get("created_at", "")),
+                    "snapshot_id": str(item.get("snapshot_id", "")),
+                }
+                for item in self._graph_snapshots.get(run_id, [])
+            ]
+
+    async def get_graph_snapshot(
+        self, session_id: str, run_id: str, *, checkpoint_id: str | None = None
+    ) -> dict[str, object] | None:
+        async with self._lock:
+            run = self._runs.get(run_id)
+            if run is None or run.session_id != session_id:
+                return None
+            snapshots = self._graph_snapshots.get(run_id, [])
+            if checkpoint_id:
+                for item in snapshots:
+                    if item.get("checkpoint_id") == checkpoint_id:
+                        return dict(item)
+                return None
+            return dict(snapshots[-1]) if snapshots else None
+
     async def append_event(
         self,
         session_id: str,
@@ -460,6 +580,20 @@ class InMemorySessionRepository(SessionRepository):
                             "role": "assistant",
                             "content": response,
                             "sequence": len(self._messages[session_id]) + 1,
+                        }
+                    )
+            if event_type == "persist_snapshot_completed":
+                data = _agent_event_data(payload or {})
+                snapshot = data.get("snapshot") if isinstance(data, dict) else None
+                if isinstance(snapshot, dict):
+                    self._graph_snapshots[run_id].append(
+                        {
+                            "checkpoint_id": f"event:{sequence}",
+                            "snapshot_id": f"snapshot:{sequence}",
+                            "node_name": str(snapshot.get("loop_stage") or "persist_snapshot"),
+                            "step_number": sequence,
+                            "created_at": event.created_at.isoformat(),
+                            "data": {"state_snapshot": snapshot.get("state_snapshot") or {}, "snapshot": snapshot},
                         }
                     )
 
@@ -669,6 +803,61 @@ class SQLiteSessionRepository(SessionRepository):
         if record is None or record.session_id != session_id or record.run_id != run_id:
             return None
         return _patch_from_memory(record)
+
+    async def create_skill_change_proposal(self, proposal: SkillChangeProposal) -> SkillChangeProposal:
+        repo = await self._repo()
+        record = await repo.create_skill_change_proposal(
+            session_id=proposal.session_id,
+            run_id=proposal.run_id,
+            proposal_id=proposal.id,
+            action=proposal.action,
+            skill_name=proposal.skill_name,
+            target_paths=proposal.target_paths,
+            diff=proposal.diff,
+            operations=[operation.model_dump(mode="json") for operation in proposal.operations],
+            status=proposal.status,
+        )
+        return _skill_change_from_memory(record)
+
+    async def list_skill_change_proposals(self, session_id: str, run_id: str) -> list[SkillChangeProposal]:
+        repo = await self._repo()
+        records = await repo.list_skill_change_proposals(session_id=session_id, run_id=run_id)
+        return [_skill_change_from_memory(record) for record in records]
+
+    async def get_skill_change_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        proposal_id: str,
+    ) -> SkillChangeProposal | None:
+        repo = await self._repo()
+        record = await repo.get_skill_change_proposal(proposal_id)
+        if record is None or record.session_id != session_id or record.run_id != run_id:
+            return None
+        return _skill_change_from_memory(record)
+
+    async def update_skill_change_proposal(
+        self,
+        session_id: str,
+        run_id: str,
+        proposal_id: str,
+        *,
+        status: str | None = None,
+        apply_results: list[dict[str, object]] | None = None,
+        error: str | None = None,
+        decided: bool = False,
+    ) -> SkillChangeProposal | None:
+        repo = await self._repo()
+        record = await repo.update_skill_change_proposal(
+            proposal_id=proposal_id,
+            status=status,
+            apply_results=apply_results,
+            error=error,
+            decided=decided,
+        )
+        if record is None or record.session_id != session_id or record.run_id != run_id:
+            return None
+        return _skill_change_from_memory(record)
 
     async def list_memory_candidates(
         self,
@@ -905,6 +1094,25 @@ def _patch_from_memory(record: object) -> PatchProposal:
     )
 
 
+def _skill_change_from_memory(record: object) -> SkillChangeProposal:
+    return SkillChangeProposal(
+        id=str(record.id),
+        session_id=str(record.session_id),
+        run_id=str(record.run_id),
+        status=str(record.status),
+        action=str(record.action),
+        skill_name=str(record.skill_name),
+        target_paths=list(record.target_paths or []),
+        diff=str(record.diff or ""),
+        operations=list(record.operations or []),
+        apply_results=list(record.apply_results or []),
+        error=record.error,
+        created_at=record.created_at.isoformat() if record.created_at else None,
+        updated_at=record.updated_at.isoformat() if record.updated_at else None,
+        decided_at=record.decided_at.isoformat() if record.decided_at else None,
+    )
+
+
 def _message_to_dict(record: object) -> dict[str, object]:
     return {
         "id": str(record.id),
@@ -922,4 +1130,3 @@ def _agent_event_data(payload: dict[str, object]) -> dict[str, object]:
     if isinstance(data, dict):
         return data
     return payload
-

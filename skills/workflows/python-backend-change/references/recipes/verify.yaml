@@ -1,0 +1,27 @@
+{
+  "id": "verify",
+  "name": "Verify Python backend change",
+  "description": "Run backend tests and ruff checks after meaningful backend changes.",
+  "when": ["verify", "verification", "ruff", "lint", "quality", "after edit"],
+  "mode": "quality",
+  "priority": 60,
+  "run_policy": "auto",
+  "failure_policy": "continue",
+  "steps": [
+    {
+      "id": "pytest-backend",
+      "tool": "run_command",
+      "description": "Run backend pytest.",
+      "risk_level": "medium-safe",
+      "arguments": {"command": "python", "args": ["-m", "pytest", "backend/tests", "-q"], "purpose": "Verify backend behavior after a change."}
+    },
+    {
+      "id": "ruff-check",
+      "tool": "run_command",
+      "description": "Run ruff check without writing fixes.",
+      "risk_level": "medium-safe",
+      "arguments": {"command": "ruff", "args": ["check", "backend/src/solo_agent", "backend/tests"], "purpose": "Verify Python lint without modifying files."}
+    }
+  ],
+  "success_criteria": ["Backend tests and lint checks pass, or failures are reported with scope."]
+}

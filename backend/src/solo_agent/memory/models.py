@@ -113,6 +113,10 @@ class RunRecord(Base):
     timing_points: Mapped[list[TimingPointRecord]] = relationship(back_populates="run", cascade="all, delete-orphan")
     snapshots: Mapped[list[SnapshotRecord]] = relationship(back_populates="run")
     patch_proposals: Mapped[list[PatchProposalRecord]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    skill_change_proposals: Mapped[list[SkillChangeProposalRecord]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
 
 
 class MessageRecord(Base):
@@ -202,6 +206,27 @@ class PatchProposalRecord(Base):
     run: Mapped[RunRecord] = relationship(back_populates="patch_proposals")
 
 
+class SkillChangeProposalRecord(Base):
+    __tablename__ = "skill_change_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    action: Mapped[str] = mapped_column(String(32), index=True)
+    skill_name: Mapped[str] = mapped_column(String(255), index=True)
+    target_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    diff: Mapped[str] = mapped_column(Text, default="")
+    operations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    apply_results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    run: Mapped[RunRecord] = relationship(back_populates="skill_change_proposals")
+
+
 class MemoryCandidateRecord(Base):
     __tablename__ = "memory_candidates"
 
@@ -265,6 +290,7 @@ Index("ix_snapshots_run_type_created", SnapshotRecord.run_id, SnapshotRecord.sna
 Index("ix_snapshots_type_label", SnapshotRecord.snapshot_type, SnapshotRecord.label)
 Index("ix_snapshots_run_created", SnapshotRecord.run_id, SnapshotRecord.created_at)
 Index("ix_patch_proposals_run_created", PatchProposalRecord.run_id, PatchProposalRecord.created_at)
+Index("ix_skill_change_proposals_run_created", SkillChangeProposalRecord.run_id, SkillChangeProposalRecord.created_at)
 Index("ix_memory_candidates_status_created", MemoryCandidateRecord.status, MemoryCandidateRecord.created_at)
 Index("ix_memory_entries_target_status", MemoryEntryRecord.target, MemoryEntryRecord.status)
 Index("ix_workflow_observations_signature_created", WorkflowObservationRecord.signature, WorkflowObservationRecord.created_at)

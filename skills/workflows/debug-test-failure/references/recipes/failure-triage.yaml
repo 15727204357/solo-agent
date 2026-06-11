@@ -1,0 +1,26 @@
+{
+  "id": "failure-triage",
+  "name": "Triage failing tests",
+  "description": "Reproduce or collect failing pytest output and search for the smallest relevant unit.",
+  "when": ["test failure", "pytest failed", "failing test", "traceback", "regression"],
+  "mode": "debug",
+  "priority": 95,
+  "run_policy": "auto",
+  "failure_policy": "continue",
+  "steps": [
+    {
+      "id": "pytest",
+      "tool": "run_command",
+      "description": "Run pytest to capture the current failure signal.",
+      "risk_level": "medium-safe",
+      "arguments": {"command": "python", "args": ["-m", "pytest", "-q"], "purpose": "Capture failing pytest output for triage."}
+    },
+    {
+      "id": "search-tests",
+      "tool": "search_code",
+      "description": "Search tests for task terms after collecting failure output.",
+      "arguments": {"query": "{{user_input}}", "path": "backend/tests", "glob": "*.py", "regex": false, "context_lines": 1, "max_matches": 30}
+    }
+  ],
+  "success_criteria": ["The original failure signal is captured or the environment blocker is explicit."]
+}

@@ -122,14 +122,18 @@ def filter_tools_by_allowlist(
 
 # Default read-only tool allowlist for subagents. Edit tools remain available to the lead agent only.
 READONLY_TOOL_NAMES = {
+    "find_files",
     "list_files",
     "read_file",
+    "search_code",
     "search_text",
     "get_file_hash",
     "workspace_snapshot",
     "inspect_python_symbols",
+    "run_command",
     "git_status",
     "git_diff",
+    "git_show",
     "git_recent_changes",
     "read_test_failure",
     "list_skills",

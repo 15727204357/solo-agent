@@ -5,6 +5,7 @@ category: workflow
 triggers: [test failure, pytest failed, ruff failed, traceback, regression]
 red_flags: [fix without reading failure, change unrelated code, silence test]
 required_tools: [run_pytest, run_ruff_check, search_text, read_file, prepare_edit, preview_patch, apply_text_edit]
+metadata: {"hermes": {"recipes": [{"id": "failure-triage", "file": "references/recipes/failure-triage.yaml"}]}}
 ---
 
 # Debug Test Failure

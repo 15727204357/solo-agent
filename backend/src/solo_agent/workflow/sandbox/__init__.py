@@ -1,2 +1,17 @@
-# UNINTEGRATED: Sandbox tool adapter not yet wired into main workflow
-# Sandbox abstraction and local implementation
+from .workspace_backend import (
+    CopyWorkspaceBackend,
+    DockerWorkspaceBackend,
+    LocalWorkspaceBackend,
+    WorkspaceBackend,
+    WorkspaceBackendMetadata,
+    create_workspace_backend,
+)
+
+__all__ = [
+    "CopyWorkspaceBackend",
+    "DockerWorkspaceBackend",
+    "LocalWorkspaceBackend",
+    "WorkspaceBackend",
+    "WorkspaceBackendMetadata",
+    "create_workspace_backend",
+]

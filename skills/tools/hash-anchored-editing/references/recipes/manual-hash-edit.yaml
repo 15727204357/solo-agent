@@ -1,0 +1,37 @@
+{
+  "id": "manual-hash-edit",
+  "name": "Manual hash-anchored edit",
+  "description": "Describe the guarded edit sequence without auto-executing writes.",
+  "when": ["edit", "modify", "patch", "write code", "refactor"],
+  "mode": "manual",
+  "priority": 40,
+  "run_policy": "manual",
+  "failure_policy": "stop",
+  "steps": [
+    {
+      "id": "prepare",
+      "tool": "prepare_edit",
+      "description": "Prepare a hash-anchored edit package.",
+      "run_policy": "manual",
+      "risk_level": "medium",
+      "arguments": {"path": "{{user_input}}"}
+    },
+    {
+      "id": "preview",
+      "tool": "preview_patch",
+      "description": "Preview the exact diff before applying.",
+      "run_policy": "manual",
+      "risk_level": "medium",
+      "arguments": {"path": "{{user_input}}"}
+    },
+    {
+      "id": "apply",
+      "tool": "apply_text_edit",
+      "description": "Apply only after hash and preview are valid.",
+      "run_policy": "manual",
+      "risk_level": "high",
+      "arguments": {"path": "{{user_input}}"}
+    }
+  ],
+  "success_criteria": ["No write is performed without hash anchoring and preview."]
+}

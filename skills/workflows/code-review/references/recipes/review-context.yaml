@@ -1,0 +1,26 @@
+{
+  "id": "review-context",
+  "name": "Collect review context",
+  "description": "Collect git diff and workspace context for a bug-focused code review.",
+  "when": ["review", "code review", "inspect changes", "risk", "regression"],
+  "mode": "review",
+  "priority": 90,
+  "run_policy": "auto",
+  "failure_policy": "continue",
+  "steps": [
+    {
+      "id": "status",
+      "tool": "git_status",
+      "description": "Inspect changed files.",
+      "arguments": {}
+    },
+    {
+      "id": "diff",
+      "tool": "git_diff",
+      "description": "Inspect current diff for review findings.",
+      "risk_level": "medium-safe",
+      "arguments": {}
+    }
+  ],
+  "success_criteria": ["Review has concrete changed-file and diff context before findings."]
+}

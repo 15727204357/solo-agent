@@ -1,3 +1,4 @@
+from .actions import AgentAction
 from .deps import AgentDeps, AgentSettings
 from .events import AgentEvent
 from .graph import run_agent_events
@@ -6,6 +7,7 @@ from .state import AgentState, ToolCallRecord
 
 __all__ = [
     "AgentDeps",
+    "AgentAction",
     "AgentEvent",
     "AgentSettings",
     "AgentState",

@@ -1,5 +1,9 @@
 # Workflow Engine v2 — LangGraph StateGraph Runtime
 
+> Archived note: this page describes the original LangGraph migration design and
+> contains legacy placeholder details. The active coding-agent workflow is
+> documented in `docs/solo_agent_coding_workflow.md`.
+
 ## Why StateGraph
 
 The original Solo Agent text-provider workflow used a hard-coded async stage loop (`_run_text_provider_strategy`) that manually called stage functions in sequence. This approach:

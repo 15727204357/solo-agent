@@ -2,72 +2,85 @@
 
 ## Architecture
 
-Solo Agent uses a single **LangGraph StateGraph** as its sole workflow orchestration engine. All execution modes — plan mode, agent serial, agent parallel, verified editing, error recovery, and checkpoint/replay — are implemented as graph nodes and conditional routes within this one graph.
+Solo Agent uses one LangGraph `StateGraph` as the main workflow runtime. The
+graph owns memory/skill loading, planning, serial execution, lightweight team
+subagents, verified editing, error recovery, response, and persistence.
 
 ## Graph Topology
 
-The main workflow graph is built by `build_main_workflow_graph()` in `backend/src/solo_agent/workflow/graphs.py`.
+`build_main_workflow_graph()` in `backend/src/solo_agent/workflow/graphs.py`
+builds the active graph:
 
-```
+```text
 START
-  → receive_user_turn
-  → memory_enabled_route
-     → [enabled] load_builtin_memory → prefetch_memory → build_memory_context
-     → [disabled] skip_memory
-  → skill_context
-  → context_guard_before_plan
-  → run_mode_route
-     → [plan] deep_plan → plan_quality_gate → [passed] plan_self_review → plan_response → postlude
-                      → [failed] deep_plan_revision → plan_quality_gate (max 2 revisions)
-     → [agent] plan → task_state → parallelism_gate
-        → [serial] collect_context → inspect → select_tools → execute_tools → spec_compliance_review
-        → [parallel] parallel_dispatch → wait_subagents → supervisor_review
-  → propose_verified_patch (if patch needed)
-     → [awaiting_approval] END
-     → [no patch] subdirectory_hint → context_guard_before_respond → respond
-  → postlude: sync_memory → queue_prefetch → compress_memory → persist_snapshot → END
+  -> receive_user_turn
+  -> memory prelude
+  -> skill_context
+  -> context_guard_before_plan
+  -> load_task_state
+  -> plan
+  -> task_state
+     -> [plan + subagent_enabled] team_plan
+          -> team_develop
+          -> team_test
+             -> [needs_fix and loop < 2] team_develop
+             -> team_supervisor
+                -> [patch proposal ready] END awaiting approval
+                -> [no proposal] collect_context
+     -> [default] collect_context
+  -> inspect -> select_tools -> execute_tools
+  -> spec_compliance_review -> propose_verified_patch
+  -> subdirectory_hint -> context_guard_before_respond -> respond
+  -> skill_evolution -> memory postlude -> persist_snapshot -> END
 ```
 
-### Error Recovery Routing
+## Team Subagent Path
 
-Every node's exception is caught and routed through:
+The team path is intentionally small and stable:
+
+- It only runs when `run_mode=plan` and `subagent_enabled=true`.
+- `team_plan` converts the lead plan/task state into a task directory and at
+  most two developer assignments.
+- `collect_context` builds a lightweight code map and impact analysis for code
+  tasks before the team path reaches developer/tester stages.
+- `team_develop` prefers a restricted coding tool loop inside the command
+  workspace. The developer can read/search code, prepare and preview edits,
+  apply text edits in the sandbox, run pytest/ruff, and inspect sandbox diff.
+  Providers without tool calling still use the JSON patch fallback, applied
+  only inside the command workspace.
+- `team_test` runs targeted verification commands from the team plan in the
+  command workspace, falls back to impact-analysis verification suggestions,
+  and allows at most two developer feedback rounds.
+- `team_supervisor` turns the final patch request into the normal pending
+  verified patch proposal for the main workspace using sandbox diff and ledger
+  evidence rather than trusting model-authored final JSON.
+
+Developer subagents never write the main workspace directly. Main workspace
+changes still require the existing verified editing approval flow.
+
+## Legacy Parallelism Gate
+
+`workflow.parallelism` and the `parallelism_gate`/`parallel_dispatch` helpers
+remain available for diagnostics and tests, but they are no longer the main
+subagent route. The product-facing multi-agent story is the fixed team workflow.
+
+## Error Recovery
+
+Graph node exceptions route through:
+
+```text
+classify_error -> recovery_route
+  -> [recoverable] recovery_action -> repetition_guard
+  -> [policy_violation] blocked_response
+  -> [environment_error] environment_error_response
+  -> [architecture_failure] architecture_failure_response
 ```
-classify_error → recovery_route
-  → [recoverable] recovery_action → retry
-  → [policy_violation] blocked_response → postlude
-  → [environment_error] environment_error_response → postlude
-  → [architecture_failure] architecture_failure_response → postlude
-```
 
-## Node Definitions
+## Checkpoint And Replay
 
-### Prelude Nodes
-- **receive_user_turn**: Initialize run state (loop stage, run mode, memory/skill budgets)
-- **load_builtin_memory**: Load MEMORY.md and USER.md files
-- **prefetch_memory**: Load conversation history, summary, retrieved memories
-- **build_memory_context**: Build `<memory-context>` fence block
-- **skill_context**: Select and load relevant skills
-- **context_guard_before_plan**: Check context budget before planning
-
-### Plan Route
-- **deep_plan**: Generate Superpowers-style implementation plan
-- **plan_quality_gate**: Deterministic validation (no placeholders, concrete steps, 2-5 min granularity)
-- **deep_plan_revision**: Revise plan after quality gate failure (max 1 revision)
-- **plan_self_review**: LLM self-review of final plan
-
-### Agent Route
-- **plan**: Generate task plan
-- **parallelism_gate**: Deterministic independence check (problem_domain, context, write_set, verification)
-- **serial path**: collect_context → inspect → select_tools → execute_tools
-- **parallel path**: parallel_dispatch → wait_subagents → supervisor_review
-
-## State Model
-
-See `backend/src/solo_agent/workflow/graph_state.py` and `backend/src/solo_agent/agent/state.py` for the complete state model.
-
-## Checkpoint / Replay
-
-- SQLite checkpointer is the default (`workflow_checkpointer: "sqlite"`)
-- Checkpoint refs are persisted as snapshots
-- API endpoints: `GET /checkpoints`, `GET /graph`, `POST /resume`, `POST /replay`
-- Replay supports dry-run mode (write tools blocked)
+SQLite remains the default checkpointer. The web API exposes checkpoint,
+interrupt, resume, artifacts, and replay operations. Resume can target
+`team_develop`, `team_test`, or `team_supervisor` with human feedback and
+recovery hints. Sandbox artifacts are retained for approval, paused, and
+awaiting-feedback states so the next run can continue from the same evidence
+when the sandbox still exists.

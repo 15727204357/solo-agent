@@ -9,6 +9,48 @@ from typing import Any
 from solo_agent.agent.deps import AgentSettings
 from solo_agent.providers import ChatMessage, ChatProvider
 
+SUBAGENT_TOOL_ALLOWLISTS = {
+    "general-purpose": {
+        "workspace_snapshot",
+        "list_files",
+        "find_files",
+        "read_file",
+        "search_text",
+        "search_code",
+        "inspect_python_symbols",
+        "get_file_hash",
+    },
+    "code-review": {
+        "workspace_snapshot",
+        "list_files",
+        "find_files",
+        "read_file",
+        "search_text",
+        "search_code",
+        "inspect_python_symbols",
+        "get_file_hash",
+        "git_status",
+        "git_diff",
+        "git_show",
+        "git_recent_changes",
+    },
+    "quality": {
+        "workspace_snapshot",
+        "list_files",
+        "find_files",
+        "read_file",
+        "search_text",
+        "search_code",
+        "inspect_python_symbols",
+        "get_file_hash",
+        "run_command",
+        "run_pytest",
+        "run_ruff_check",
+        "targeted_pytest",
+        "read_test_failure",
+    },
+}
+
 DEFAULT_SUBAGENT_TOOLS = {
     "workspace_snapshot",
     "read_file",
@@ -49,7 +91,11 @@ class SubagentRunner:
         parent_run_id: str | None = None,
     ) -> dict[str, Any]:
         bounded_timeout = max(1, min(int(timeout_seconds or self.settings.subagent_timeout_seconds), 3600))
-        sanitized_tools = _sanitize_allowed_tools(allowed_tools)
+        sanitized_tools, blocked_tools = _resolve_allowed_tools(
+            allowed_tools,
+            subagent_type=subagent_type,
+            tool_registry=self.tool_registry,
+        )
         base = {
             "task_id": str(task_id),
             "subagent_type": str(subagent_type or "general-purpose"),
@@ -67,7 +113,11 @@ class SubagentRunner:
                 "parent_session_id": parent_session_id,
                 "parent_run_id": parent_run_id,
                 "allowed_tools": sorted(sanitized_tools),
+                "allowed_tools_effective": sorted(sanitized_tools),
+                "blocked_tools": sorted(blocked_tools),
             },
+            "allowed_tools_effective": sorted(sanitized_tools),
+            "blocked_tools": sorted(blocked_tools),
         }
         try:
             evidence = await self._collect_evidence(read_paths, sanitized_tools)
@@ -93,6 +143,8 @@ class SubagentRunner:
                     "result": str(response).strip(),
                     "findings": findings,
                     "evidence": evidence,
+                    "evidence_summary": _evidence_summary(evidence),
+                    "sandbox": _sandbox_summary(evidence),
                 }
             )
         except Exception as exc:
@@ -129,6 +181,12 @@ class SubagentRunner:
                     {"query": keyword, "path": ".", "max_matches": 20},
                 )
                 evidence.append(_evidence_item("search_text", keyword, result))
+        if "run_pytest" in allowed_tools:
+            result = await _call_registered_tool(self.tool_registry, "run_pytest", {"timeout_seconds": 60})
+            evidence.append(_evidence_item("run_pytest", ".", result))
+        if "run_ruff_check" in allowed_tools:
+            result = await _call_registered_tool(self.tool_registry, "run_ruff_check", {"timeout_seconds": 60})
+            evidence.append(_evidence_item("run_ruff_check", ".", result))
         return evidence[:20]
 
 
@@ -142,9 +200,52 @@ async def _call_registered_tool(tool_registry: Any, name: str, arguments: dict[s
     return {"ok": False, "tool": name, "error": "tool registry cannot call tools"}
 
 
-def _sanitize_allowed_tools(allowed_tools: list[str]) -> set[str]:
+def _resolve_allowed_tools(
+    allowed_tools: list[str],
+    *,
+    subagent_type: str,
+    tool_registry: Any,
+) -> tuple[set[str], set[str]]:
     requested = {str(tool).strip() for tool in allowed_tools if str(tool).strip()}
-    return (requested or DEFAULT_SUBAGENT_TOOLS) & DEFAULT_SUBAGENT_TOOLS
+    type_allowlist = SUBAGENT_TOOL_ALLOWLISTS.get(subagent_type, SUBAGENT_TOOL_ALLOWLISTS["general-purpose"])
+    requested_or_default = requested or (DEFAULT_SUBAGENT_TOOLS & type_allowlist)
+    registry_safe = _registry_safe_tools(tool_registry)
+    effective = requested_or_default & type_allowlist & registry_safe
+    blocked = requested - effective
+    return effective, blocked
+
+
+def _registry_safe_tools(tool_registry: Any) -> set[str]:
+    safe: set[str] = set()
+    tools_by_name = getattr(tool_registry, "_tools", {})
+    if isinstance(tools_by_name, Mapping):
+        for name, spec in tools_by_name.items():
+            if not bool(getattr(spec, "read_only", False)):
+                continue
+            if str(getattr(spec, "category", "")) not in {"context", "code_intelligence", "quality", "vcs"}:
+                continue
+            safe.add(str(name))
+    if safe:
+        return safe
+    for method_name in ("list_all_tools", "list_tools"):
+        method = getattr(tool_registry, method_name, None)
+        if method is None:
+            continue
+        try:
+            tools = method(visibility="all") if method_name == "list_tools" else method()
+        except TypeError:
+            tools = method()
+        for tool in tools or []:
+            if not isinstance(tool, Mapping):
+                continue
+            if not bool(tool.get("read_only", True)):
+                continue
+            if str(tool.get("category", "")) not in {"context", "code_intelligence", "quality", "vcs"}:
+                continue
+            safe.add(str(tool.get("name") or ""))
+        if safe:
+            return safe
+    return set(DEFAULT_SUBAGENT_TOOLS)
 
 
 def _messages(
@@ -203,6 +304,29 @@ def _evidence_item(tool: str, target: str, result: Any) -> dict[str, Any]:
 
 def _evidence_refs(evidence: list[dict[str, Any]]) -> list[str]:
     return [f"{item.get('tool')}:{item.get('target')}" for item in evidence[:5]]
+
+
+def _evidence_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    tools = [str(item.get("tool") or "") for item in evidence if item.get("tool")]
+    return {
+        "item_count": len(evidence),
+        "tools": sorted(set(tools)),
+    }
+
+
+def _sandbox_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    sandboxes: list[dict[str, Any]] = []
+    for item in evidence:
+        result = item.get("result")
+        if not isinstance(result, Mapping):
+            continue
+        metadata = result.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        sandbox = metadata.get("sandbox")
+        if isinstance(sandbox, Mapping):
+            sandboxes.append(dict(sandbox))
+    return {"commands": sandboxes}
 
 
 def _keywords(text: str) -> list[str]:
