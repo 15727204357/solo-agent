@@ -22,8 +22,12 @@ def judge_task_outcome(
     failures = [dict(item) for item in (failure_reports or [])]
     evidence = [dict(item) for item in (command_evidence or [])]
     proposal = dict(patch_proposal or {})
+    evidence.extend(_command_evidence_from_patch(proposal))
     diff = sandbox_diff or str(proposal.get("diff") or "")
     test_status = str((test_report or {}).get("status") or "")
+    stop_gate = _stop_gate(proposal)
+    stop_gate_status = str(stop_gate.get("status") or "")
+    stop_gate_waived = stop_gate_status == "waived" and bool(str(stop_gate.get("reason") or "").strip())
     has_changes = bool(diff.strip()) or bool(proposal.get("edits"))
     passed_commands = _passed_command_count(evidence)
     failed_commands = _failed_command_count(evidence)
@@ -38,9 +42,13 @@ def judge_task_outcome(
         next_actions.append("Resolve classified verification failures before approval.")
     if failed_commands:
         risks.append(RiskItem("high", f"{failed_commands} verification command(s) failed.", "Use remediation feedback."))
-    if not passed_commands and test_status not in {"passed", "accepted_with_failures"}:
+    if stop_gate_status == "failed":
+        risks.append(RiskItem("high", "Patch stop gate failed.", "Fix the patch or rerun the planned verification."))
+    if not passed_commands and test_status not in {"passed", "accepted_with_failures"} and not stop_gate_waived:
         missing.append("No passing verification command evidence is available.")
         risks.append(RiskItem("medium", "Patch has limited verification evidence.", "Run targeted pytest/ruff where possible."))
+    if has_changes and stop_gate_status == "missing":
+        next_actions.append("Run the patch verification plan before approval.")
     if impact_analysis and not impact_analysis.get("related_tests"):
         risks.append(RiskItem("low", "Impact analysis did not identify related tests.", "Consider broader pytest coverage."))
 
@@ -55,16 +63,20 @@ def judge_task_outcome(
     if blocked:
         status = "blocked"
         approval_ready = False
-    elif failures or failed_commands:
+    elif failures or failed_commands or stop_gate_status == "failed":
         status = "needs_fix"
         approval_ready = False
-    elif has_changes and (passed_commands or test_status == "passed"):
+    elif has_changes and (passed_commands or test_status == "passed" or stop_gate_status == "passed"):
         status = "passed"
         approval_ready = True
-    elif has_changes and not failures:
+    elif has_changes and stop_gate_waived:
         status = "inconclusive"
         approval_ready = True
-        next_actions.append("Approval can proceed, but verification evidence should be strengthened.")
+        next_actions.append("Approval can proceed under the recorded stop-gate waiver.")
+    elif has_changes and not failures:
+        status = "inconclusive"
+        approval_ready = False
+        next_actions.append("Approval should wait for passing verification evidence or an explicit waiver.")
     else:
         status = "inconclusive"
         approval_ready = False
@@ -83,8 +95,30 @@ def judge_task_outcome(
             "failed_command_count": failed_commands,
             "failure_count": len(failures),
             "test_status": test_status,
+            "stop_gate_status": stop_gate_status,
+            "stop_gate_approval_ready": bool(stop_gate.get("approval_ready", False)),
         },
     ).to_dict()
+
+
+def _stop_gate(proposal: Mapping[str, Any]) -> dict[str, Any]:
+    gate = proposal.get("stop_gate")
+    return dict(gate) if isinstance(gate, Mapping) else {}
+
+
+def _command_evidence_from_patch(proposal: Mapping[str, Any]) -> list[dict[str, Any]]:
+    verification = proposal.get("verification")
+    if not isinstance(verification, Mapping):
+        return []
+    commands = verification.get("commands")
+    if not isinstance(commands, Sequence) or isinstance(commands, (str, bytes)):
+        return []
+    evidence: list[dict[str, Any]] = []
+    for item in commands:
+        if not isinstance(item, Mapping):
+            continue
+        evidence.append({"command": item.get("command"), "result": item.get("result")})
+    return evidence
 
 
 def _passed_command_count(evidence: Sequence[Mapping[str, Any]]) -> int:

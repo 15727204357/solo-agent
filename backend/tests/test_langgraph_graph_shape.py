@@ -48,6 +48,9 @@ class FakeSettings:
     skill_evolution_enabled = True
     skill_evolution_min_confidence = 0.72
     skill_evolution_max_proposals_per_run = 1
+    intent_router_mode = "shadow_hybrid"
+    intent_router_max_epochs = 3
+    intent_router_model_timeout_seconds = 1.5
 
 
 class FakeProvider:
@@ -106,13 +109,13 @@ async def test_route_after_parallelism_gate_blocked_returns_end() -> None:
 @pytest.mark.asyncio
 async def test_route_after_parallelism_gate_parallel() -> None:
     state: SoloGraphState = {"agent_state": {"execution_strategy": "parallel", "blocked": False}, "events": [], "error": None}
-    assert route_after_parallelism_gate(state) == "parallel_dispatch"
+    assert route_after_parallelism_gate(state) == "team_develop"
 
 
 @pytest.mark.asyncio
 async def test_route_after_parallelism_gate_serial() -> None:
     state: SoloGraphState = {"agent_state": {"execution_strategy": "serial", "blocked": False}, "events": [], "error": None}
-    assert route_after_parallelism_gate(state) == "collect_context"
+    assert route_after_parallelism_gate(state) == "team_develop"
 
 
 @pytest.mark.asyncio
@@ -125,6 +128,39 @@ async def test_route_after_execute_tools_awaiting_approval() -> None:
 async def test_route_after_execute_tools_continue() -> None:
     state: SoloGraphState = {"agent_state": {"awaiting_approval": False}, "events": [], "error": None}
     assert route_after_execute_tools(state) == "spec_compliance_review"
+
+
+@pytest.mark.asyncio
+async def test_route_after_execute_tools_reroutes_on_no_results() -> None:
+    state: SoloGraphState = {
+        "agent_state": {
+            "awaiting_approval": False,
+            "route_epoch": 0,
+            "snapshots": {"intent_router": {"max_epochs": 3}},
+            "tool_calls": [{"name": "search_text", "result": {"matches": []}}],
+        },
+        "events": [],
+        "error": None,
+    }
+    assert route_after_execute_tools(state) == "intent_route"
+
+
+@pytest.mark.asyncio
+async def test_route_after_execute_tools_honors_pending_reroute_request() -> None:
+    state: SoloGraphState = {
+        "agent_state": {
+            "awaiting_approval": False,
+            "route_epoch": 3,
+            "snapshots": {
+                "intent_router": {"max_epochs": 3},
+                "pending_reroute": {"reason": "tool_no_results"},
+            },
+            "tool_calls": [],
+        },
+        "events": [],
+        "error": None,
+    }
+    assert route_after_execute_tools(state) == "intent_route"
 
 
 @pytest.mark.asyncio
@@ -262,13 +298,17 @@ async def test_graph_uses_single_main_plan_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_registers_graph_level_subagent_nodes() -> None:
+async def test_graph_keeps_legacy_fanout_nodes_unwired() -> None:
     graph = build_main_workflow_graph(provider=FakeProvider(), deps=FakeDeps(), settings=FakeSettings())
     node_names = set(graph.nodes.keys())
+    edges = {(str(edge[0]), str(edge[1])) for edge in graph.edges}
 
     assert "parallel_dispatch" in node_names
     assert "wait_subagents" in node_names
     assert "supervisor_review" in node_names
+    assert ("team_plan", "parallelism_gate") in edges
+    assert ("parallel_dispatch", "wait_subagents") not in edges
+    assert ("wait_subagents", "supervisor_review") not in edges
 
 
 @pytest.mark.asyncio
@@ -280,3 +320,4 @@ async def test_graph_registers_lightweight_team_nodes() -> None:
     assert "team_develop" in node_names
     assert "team_test" in node_names
     assert "team_supervisor" in node_names
+    assert "intent_route" in node_names

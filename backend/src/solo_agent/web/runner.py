@@ -43,6 +43,11 @@ class AgentRunner:
                 {"heuristic", "model"},
                 settings.tool_loop_mode,
             )
+            intent_router_mode = _bounded_choice(
+                str(run.metadata.get("intent_router_mode", settings.intent_router_mode)),
+                {"rules", "shadow_hybrid", "hybrid"},
+                settings.intent_router_mode,
+            )
             approval_mode = _bounded_choice(
                 str(run.metadata.get("approval_mode", settings.approval_mode)),
                 {"confirm", "manual_only"},
@@ -99,6 +104,9 @@ class AgentRunner:
                 patch_max_tokens=settings.patch_max_tokens,
                 run_mode=run_mode,
                 tool_loop_mode=tool_loop_mode,
+                intent_router_mode=intent_router_mode,
+                intent_router_max_epochs=settings.intent_router_max_epochs,
+                intent_router_model_timeout_seconds=settings.intent_router_model_timeout_seconds,
                 approval_mode=approval_mode,
                 workspace_backend=workspace_backend_kind,
                 eval_suite_id=str(eval_suite_id) if eval_suite_id else None,

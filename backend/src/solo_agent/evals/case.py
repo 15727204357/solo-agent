@@ -18,6 +18,15 @@ class EvalCase:
     expected_changed_files: list[str] = field(default_factory=list)
     forbidden_changed_files: list[str] = field(default_factory=list)
     allowed_commands: list[str] = field(default_factory=list)
+    expected_intent: str = ""
+    accepted_intents: list[str] = field(default_factory=list)
+    required_scopes: list[str] = field(default_factory=list)
+    forbidden_tools: list[str] = field(default_factory=list)
+    required_tools: list[str] = field(default_factory=list)
+    max_risk_level: str = ""
+    approval_required: bool | None = None
+    expected_reroute: bool | None = None
+    route_score_threshold: float = 0.75
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,6 +50,9 @@ class EvalResult:
     tool_calls: int = 0
     human_interventions: int = 0
     failure_class: str = ""
+    route_passed: bool = True
+    route_score: float = 1.0
+    route_notes: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
     notes: list[str] = field(default_factory=list)
 

@@ -21,6 +21,7 @@ from typing import Any
 from solo_agent.codeintel import CodeIntelligenceService
 from solo_agent.context import TaskListState, WorkspaceTaskStore
 from solo_agent.skill_recipes import (
+    RecipePolicy,
     SkillRecipe,
     compile_recipe,
     execute_recipe,
@@ -1030,22 +1031,7 @@ class WorkspaceTools:
                         filtered.append(skill)
                 skills = filtered
         compact = [
-            {
-                key: skill.get(key)
-                for key in (
-                    "name",
-                    "description",
-                    "category",
-                    "tags",
-                    "triggers",
-                    "required_tools",
-                    "path",
-                    "version",
-                    "platforms",
-                    "related_skills",
-                )
-                if skill.get(key) not in (None, "", [])
-            }
+            _skill_compact_with_route_explanation(skill, query=query or "", matched_intent="manage_skill")
             for skill in skills[:max_entries]
         ]
         return {"skills": compact, "count": len(compact), "truncated": listed["truncated"] or len(skills) > max_entries}
@@ -1156,7 +1142,7 @@ class WorkspaceTools:
             recipes = matched or recipes
         recipes = sorted(recipes, key=lambda recipe: (-recipe.priority, recipe.skill_name, recipe.id))[:max_entries]
         return {
-            "recipes": [recipe.compact(query=query or "") for recipe in recipes],
+            "recipes": [_recipe_compact_with_route_explanation(recipe, query=query or "") for recipe in recipes],
             "count": len(recipes),
             "truncated": len(recipes) >= max_entries,
             "policy": {
@@ -1301,7 +1287,13 @@ class WorkspaceTools:
             if score:
                 scored.append({**skill, "score": score})
         selected = sorted(scored, key=lambda item: (-item["score"], _skill_category_rank(item), item["path"]))[:limit]
-        return {"skills": selected, "truncated": listed["truncated"]}
+        return {
+            "skills": [
+                _skill_compact_with_route_explanation(skill, query=query, matched_intent="manage_skill")
+                for skill in selected
+            ],
+            "truncated": listed["truncated"],
+        }
 
     def task(
         self,
@@ -2621,6 +2613,98 @@ def _skill_search_text(skill: Mapping[str, Any]) -> str:
             " ".join(str(item) for item in skill.get("related_skills", [])),
         ]
     ).casefold()
+
+
+def _skill_compact_with_route_explanation(
+    skill: Mapping[str, Any],
+    *,
+    query: str,
+    matched_intent: str,
+) -> dict[str, Any]:
+    compact = {
+        key: skill.get(key)
+        for key in (
+            "name",
+            "description",
+            "category",
+            "tags",
+            "triggers",
+            "required_tools",
+            "path",
+            "version",
+            "platforms",
+            "related_skills",
+            "score",
+        )
+        if skill.get(key) not in (None, "", [])
+    }
+    matched_terms = _matched_query_terms(query, _skill_search_text(skill))
+    score = float(skill.get("score") or len(matched_terms) or 0)
+    compact.update(
+        {
+            "matched_terms": matched_terms,
+            "matched_intent": matched_intent,
+            "source_scope": "workspace_skills",
+            "confidence": round(min(0.95, 0.5 + max(score, len(matched_terms)) * 0.08), 2),
+            "risk_level": _skill_route_risk_level(skill),
+            "recommendation_reason": _skill_recommendation_reason(matched_terms),
+        }
+    )
+    return compact
+
+
+def _recipe_compact_with_route_explanation(recipe: SkillRecipe, *, query: str) -> dict[str, Any]:
+    compact = recipe.compact(query=query)
+    haystack = " ".join([recipe.id, recipe.name, recipe.description, *recipe.when]).casefold()
+    matched_terms = _matched_query_terms(query, haystack)
+    compact.update(
+        {
+            "matched_terms": matched_terms,
+            "confidence": round(0.55 + min(len(matched_terms), 4) * 0.08, 2),
+            "blocked_or_manual_reason": _recipe_blocked_or_manual_reason(recipe),
+        }
+    )
+    return compact
+
+
+def _matched_query_terms(query: str, haystack: str) -> list[str]:
+    terms = {term.casefold() for term in re.findall(r"[\w\u4e00-\u9fff]+", query or "") if len(term) >= 2}
+    return sorted(term for term in terms if term in haystack)
+
+
+def _skill_route_risk_level(skill: Mapping[str, Any]) -> str:
+    required_tools = {str(item) for item in skill.get("required_tools", [])}
+    if required_tools & {
+        "run_command",
+        "prepare_edit",
+        "preview_patch",
+        "apply_text_edit",
+        "create_file",
+        "mkdir",
+        "move_path",
+        "delete_path",
+        "skill_manage",
+        "skill_script_run",
+    }:
+        return "medium"
+    return "low"
+
+
+def _skill_recommendation_reason(matched_terms: list[str]) -> str:
+    if matched_terms:
+        return f"Matched compact Skill metadata terms: {', '.join(matched_terms[:6])}."
+    return "Listed from compact Skill metadata; load full Skill only after explicit or routed selection."
+
+
+def _recipe_blocked_or_manual_reason(recipe: SkillRecipe) -> str:
+    blocked_reasons: list[str] = []
+    for step in recipe.steps:
+        policy = RecipePolicy.step_auto_executable(step)
+        if not policy["auto_executable"]:
+            blocked_reasons.append(str(policy["reason"]))
+    if blocked_reasons:
+        return ", ".join(sorted(set(blocked_reasons))[:4])
+    return "auto_boundary_allows_preview"
 
 
 def _normalize_skill_name(value: str) -> str:

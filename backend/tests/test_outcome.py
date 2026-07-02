@@ -24,8 +24,27 @@ def test_outcome_judge_inconclusive_without_verification_evidence() -> None:
     )
 
     assert report["status"] == "inconclusive"
-    assert report["approval_ready"] is True
+    assert report["approval_ready"] is False
     assert "No passing verification command evidence is available." in report["missing_evidence"]
+
+
+def test_outcome_judge_allows_explicit_stop_gate_waiver() -> None:
+    report = judge_task_outcome(
+        user_input="Update docs",
+        patch_proposal={
+            "id": "patch_1",
+            "diff": "--- a/README.md\n+++ b/README.md\n",
+            "stop_gate": {
+                "status": "waived",
+                "approval_ready": True,
+                "reason": "Documentation-only change.",
+            },
+        },
+    )
+
+    assert report["status"] == "inconclusive"
+    assert report["approval_ready"] is True
+    assert "No passing verification command evidence is available." not in report["missing_evidence"]
 
 
 def test_outcome_judge_blocks_dependency_failures() -> None:

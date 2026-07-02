@@ -404,7 +404,7 @@ async def test_agent_graph_injects_skills_as_user_message_only(tmp_path) -> None
     ]
 
     planner_messages = provider.seen_messages[0]
-    responder_messages = provider.seen_messages[1]
+    responder_messages = next(messages for messages in provider.seen_messages if messages[0].content == RESPONDER_SYSTEM_PROMPT)
     assert planner_messages[0].content == PLANNER_SYSTEM_PROMPT
     assert responder_messages[0].content == RESPONDER_SYSTEM_PROMPT
     assert "NO PRODUCTION CODE" not in planner_messages[0].content
@@ -474,7 +474,15 @@ async def test_agent_graph_selects_skill_context_and_quality_tools() -> None:
         )
     ]
 
+    route_event = next(event for event in events if event.type == "intent_route_completed")
     selection = next(event for event in events if event.type == "tool_selection_completed")
+    event_types = [event.type for event in events]
+    assert event_types.index("intent_route_completed") < event_types.index("tool_selection_completed")
+    assert route_event.data["intent"]
+    assert "confidence" in route_event.data
+    assert "searched_scopes" in route_event.data
+    assert "tool_candidates" in route_event.data
+    assert "risk_summary" in route_event.data
     names = [call["name"] for call in selection.data["proposed_tool_calls"]]
     assert registry.calls[0][0] == "skills_list"
     assert "workspace_snapshot" in names

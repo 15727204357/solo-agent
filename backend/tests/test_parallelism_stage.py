@@ -111,6 +111,83 @@ async def test_parallelism_gate_records_suitable_but_serial_when_subagents_disab
 
 
 @pytest.mark.asyncio
+async def test_parallelism_gate_materializes_team_developer_assignments() -> None:
+    state = AgentState(session_id="s1", run_id="r1", user_input="implement team tasks")
+    state.snapshots["team_plan"] = {
+        "mode": "team",
+        "tasks": [
+            {
+                "id": "T1",
+                "title": "Provider tests",
+                "write_paths": ["backend/tests/test_provider_config.py"],
+                "read_paths": ["backend/src/solo_agent/providers/"],
+                "verify_commands": ["pytest backend/tests/test_provider_config.py -q"],
+            },
+            {
+                "id": "T2",
+                "title": "Memory tests",
+                "write_paths": ["backend/tests/test_memory_inbox.py"],
+                "read_paths": ["backend/src/solo_agent/memory/"],
+                "verify_commands": ["pytest backend/tests/test_memory_inbox.py -q"],
+            },
+        ],
+        "assignments": [],
+    }
+
+    events = [
+        event
+        async for event in _parallelism_gate_stage(
+            state,
+            AgentSettings(subagent_policy="auto", subagent_enabled=True, max_concurrent_subagents=2),
+        )
+    ]
+
+    team_plan = state.snapshots["team_plan"]
+    assert [event.type for event in events] == [
+        "parallelism_gate_started",
+        "parallelism_decision_completed",
+        "parallelism_gate_completed",
+    ]
+    assert state.execution_strategy == "parallel"
+    assert state.parallelism_decision["mode"] == "developer_parallelism"
+    assert state.parallelism_decision["developer_count"] == 2
+    assert len(team_plan["assignments"]) == 2
+    assert team_plan["developer_parallelism"] == state.parallelism_decision
+    assert team_plan["verify_commands"] == [
+        "pytest backend/tests/test_provider_config.py -q",
+        "pytest backend/tests/test_memory_inbox.py -q",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallelism_gate_collapses_team_assignments_when_write_sets_conflict() -> None:
+    state = AgentState(session_id="s1", run_id="r1", user_input="implement overlapping team tasks")
+    state.snapshots["team_plan"] = {
+        "mode": "team",
+        "tasks": [
+            {"id": "T1", "title": "First edit", "write_paths": ["backend/src/app.py"]},
+            {"id": "T2", "title": "Second edit", "write_paths": ["backend/src/app.py"]},
+        ],
+        "assignments": [],
+    }
+
+    events = [
+        event
+        async for event in _parallelism_gate_stage(
+            state,
+            AgentSettings(subagent_policy="auto", subagent_enabled=True, max_concurrent_subagents=2),
+        )
+    ]
+
+    assert events[-1].type == "parallelism_gate_completed"
+    assert state.execution_strategy == "serial"
+    assert state.parallelism_decision["mode"] == "developer_parallelism"
+    assert state.parallelism_decision["suitable"] is False
+    assert state.parallelism_decision["reason"] == "insufficient_independent_developer_work"
+    assert len(state.snapshots["team_plan"]["assignments"]) == 1
+    assert state.snapshots["team_plan"]["assignments"][0]["developer_id"] == "developer-1"
+
+@pytest.mark.asyncio
 async def test_select_tools_proposes_task_only_when_subagent_enabled_and_suitable() -> None:
     state = AgentState(session_id="s1", run_id="r1", user_input="inspect independent areas")
     state.parallelism_decision = {

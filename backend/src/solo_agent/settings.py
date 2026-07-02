@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     patch_max_tokens: int = 1400
     plan_deep_max_tokens: int = 6000
     tool_loop_mode: str = "heuristic"
+    intent_router_mode: str = "shadow_hybrid"
+    intent_router_max_epochs: int = 3
+    intent_router_model_timeout_seconds: float = 1.5
     approval_mode: str = "confirm"
     workspace_backend: str = "copy"
     eval_suite_id: str | None = None
@@ -142,6 +145,15 @@ class Settings(BaseSettings):
             import warnings
             warnings.warn(f"Invalid tool_loop_mode '{value}', falling back to 'heuristic'", stacklevel=2)
             return "heuristic"
+        return value
+
+    @field_validator("intent_router_mode")
+    @classmethod
+    def validate_intent_router_mode(cls, value: str) -> str:
+        if value not in ("rules", "shadow_hybrid", "hybrid"):
+            import warnings
+            warnings.warn(f"Invalid intent_router_mode '{value}', falling back to 'shadow_hybrid'", stacklevel=2)
+            return "shadow_hybrid"
         return value
 
     @field_validator("approval_mode")

@@ -60,6 +60,8 @@ class AgentState:
     evidence_timeline: list[dict[str, Any]] = field(default_factory=list)
     git_artifact_proposal: dict[str, Any] = field(default_factory=dict)
     eval_report: dict[str, Any] = field(default_factory=dict)
+    intent_route_plan: dict[str, Any] = field(default_factory=dict)
+    route_epoch: int = 0
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     patch_proposal: dict[str, Any] | None = None
     skill_change_proposal: dict[str, Any] | None = None
@@ -139,6 +141,8 @@ class AgentState:
             "evidence_timeline": self.evidence_timeline,
             "git_artifact_proposal": self.git_artifact_proposal,
             "eval_report": self.eval_report,
+            "intent_route_plan": self.intent_route_plan,
+            "route_epoch": self.route_epoch,
             "tool_calls": [
                 {
                     "name": call.name,

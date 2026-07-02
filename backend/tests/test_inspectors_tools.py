@@ -152,6 +152,9 @@ def test_skill_tools_sanitize_memory_fence(tmp_path: Path) -> None:
     assert listed["ok"] is True
     assert indexed["ok"] is True
     assert indexed["result"]["skills"][0]["name"] == "Python Skill"
+    assert indexed["result"]["skills"][0]["matched_terms"] == ["pytest", "python"]
+    assert indexed["result"]["skills"][0]["recommendation_reason"]
+    assert indexed["result"]["skills"][0]["risk_level"] == "low"
     assert listed["result"]["skills"][0]["name"] == "Python Skill"
     assert listed["result"]["skills"][0]["category"] == "workflow"
     assert listed["result"]["skills"][0]["triggers"] == ["pytest", "python"]
@@ -162,6 +165,8 @@ def test_skill_tools_sanitize_memory_fence(tmp_path: Path) -> None:
     assert viewed["result"]["file_path"] == "SKILL.md"
     assert "</skill-context>" not in viewed["result"]["content"]
     assert selected["result"]["skills"]
+    assert selected["result"]["skills"][0]["matched_intent"] == "manage_skill"
+    assert selected["result"]["skills"][0]["confidence"] > 0.5
 
 
 def test_skill_view_exposes_contract_fields(tmp_path: Path) -> None:
@@ -244,6 +249,10 @@ def test_skill_recipe_tools_discover_preview_and_run_declarative_recipes(tmp_pat
 
     assert listed["ok"] is True
     assert listed["result"]["recipes"][0]["id"] == "inspect"
+    assert listed["result"]["recipes"][0]["matched_terms"] == ["python"]
+    assert listed["result"]["recipes"][0]["blocked_or_manual_reason"] == "step_run_policy_manual"
+    assert listed["result"]["recipes"][0]["auto_step_count"] == 1
+    assert listed["result"]["recipes"][0]["manual_step_count"] == 1
     assert viewed["result"]["recipe"]["steps"][0]["tool"] == "find_files"
     assert preview["result"]["runnable_steps"] == 1
     assert preview["result"]["manual_steps"] == 1

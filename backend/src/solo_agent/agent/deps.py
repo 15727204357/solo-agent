@@ -41,6 +41,9 @@ class AgentSettings:
     patch_max_tokens: int = 1400
     run_mode: str = "agent"
     tool_loop_mode: str = "heuristic"
+    intent_router_mode: str = "shadow_hybrid"
+    intent_router_max_epochs: int = 3
+    intent_router_model_timeout_seconds: float = 1.5
     approval_mode: str = "confirm"
     workspace_backend: str = "copy"
     eval_suite_id: str | None = None

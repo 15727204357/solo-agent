@@ -7,6 +7,8 @@ import inspect
 import json
 import re
 import shlex
+import shutil
+import subprocess
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -38,12 +40,51 @@ from solo_agent.skill_changes import SkillChangeOperation, SkillChangeProposal
 from solo_agent.skill_evolution import analyze_skill_evolution
 from solo_agent.tools.registry import create_default_registry
 from solo_agent.verified_editing import PatchEdit, PatchProposalError, PatchRequest, build_patch_proposal, extract_patch_request
+from solo_agent.workflow.intent_router import IntentRoutePlan, plan_intent_route, reroute_triggers_from_state
 from solo_agent.workflow.parallelism import evaluate_independence, extract_task_candidates_from_text
 from solo_agent.workflow.sandbox.command_workspace import MANIFEST_NAME, build_workspace_manifest, diff_manifests
 from solo_agent.workflow.sandbox.tool_adapter import build_langchain_tool
 from solo_agent.workflow.subagent_runner import SubagentRunner
 
 _BEHAVIOR_POLICY = BehaviorPolicy()
+
+_CONTEXT_TOOL_CACHE_NAMES = {
+    "workspace_snapshot",
+    "code_index_status",
+    "code_map",
+    "analyze_impact",
+}
+
+_INITIAL_READONLY_PREFETCH_TOOL_NAMES = {
+    "workspace_snapshot",
+    "list_files",
+    "find_files",
+    "read_file",
+    "search_text",
+    "search_code",
+    "semantic_code_search",
+    "code_index_status",
+    "code_map",
+    "analyze_impact",
+    "git_status",
+    "git_show",
+    "symbol_search",
+    "symbol_definition",
+    "find_references",
+    "call_graph",
+    "test_relevance",
+}
+
+_MUTATING_TOOL_NAMES = {
+    "apply_text_edit",
+    "create_file",
+    "delete_path",
+    "move_path",
+    "mkdir",
+    "skill_manage",
+    "skill_script_run",
+    "skill_recipe_run",
+}
 
 
 async def _receive_user_turn_stage(
@@ -71,6 +112,11 @@ async def _receive_user_turn_stage(
         "tool_call_cut_off": int(_setting(settings, "tool_call_cut_off", _setting(settings, "max_tool_calls", 3))),
         "tool_output_max_bytes": int(_setting(settings, "tool_output_max_bytes", 12_000)),
     }
+    state.snapshots["intent_router"] = {
+        "mode": str(_setting(settings, "intent_router_mode", "shadow_hybrid")),
+        "max_epochs": int(_setting(settings, "intent_router_max_epochs", 3)),
+        "model_timeout_seconds": float(_setting(settings, "intent_router_model_timeout_seconds", 1.5)),
+    }
     state.skill_budget = {"max_selected_skills": 3, "injection": "user_message"}
     state.snapshots["skill_budget"] = state.skill_budget
     state.snapshots["loop_stage"] = state.loop_stage
@@ -88,6 +134,7 @@ async def _receive_user_turn_stage(
             "memory_enabled": state.memory_enabled,
             "conversation_history_enabled": state.conversation_history_enabled,
             "tool_budget": state.snapshots["tool_budget"],
+            "intent_router": state.snapshots["intent_router"],
             "skill_budget": state.skill_budget,
         },
     )
@@ -436,7 +483,8 @@ async def _collect_context_node(
                 "Checking Python code intelligence index",
                 {"backend": "python_lsp_like"},
             )
-            indexed = await _call_tool_if_available(
+            indexed = await _cached_tool_call_if_available(
+                state,
                 deps.tool_registry,
                 "code_index_status",
                 {"path": ".", "refresh": False},
@@ -459,7 +507,8 @@ async def _collect_context_node(
                     payload,
                 )
         if "code_map" in available and not state.code_map_summary:
-            mapped = await _call_tool_if_available(
+            mapped = await _cached_tool_call_if_available(
+                state,
                 deps.tool_registry,
                 "code_map",
                 {"path": ".", "max_files": int(_setting(settings, "context_file_limit", 80))},
@@ -484,7 +533,8 @@ async def _collect_context_node(
                 )
         if "analyze_impact" in available and not state.impact_analysis:
             path_hint = _extract_path_hint(state.user_input)
-            impact = await _call_tool_if_available(
+            impact = await _cached_tool_call_if_available(
+                state,
                 deps.tool_registry,
                 "analyze_impact",
                 {
@@ -533,6 +583,64 @@ async def _collect_context_node(
     )
 
 
+async def _intent_route_node(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+) -> AsyncIterator[AgentEvent]:
+    state.loop_stage = "intent_route"
+    route_epoch = int(getattr(state, "route_epoch", 0) or 0)
+    pending_reroute = dict(state.snapshots.pop("pending_reroute", {}) or {})
+    reroute_reason = str(pending_reroute.get("reason") or "")
+    yield _event(
+        state,
+        "intent_route_started",
+        "intent_route",
+        "Intent route started",
+        {
+            "route_epoch": route_epoch,
+            "reroute_reason": reroute_reason,
+            "reroute_triggers": pending_reroute.get("triggers", []),
+        },
+    )
+    route_plan = await plan_intent_route(
+        deps.tool_registry,
+        state,
+        settings,
+        provider=deps.provider,
+        reroute_reason=reroute_reason,
+    )
+    route_payload = route_plan.to_dict()
+    _store_intent_route_plan(state, route_payload, node="intent_route")
+    await _persist(
+        deps.persistence,
+        "save_route_decision",
+        session_id=state.session_id,
+        run_id=state.run_id,
+        node="intent_route",
+        route_name="intent_route",
+        selected=str(route_payload.get("intent") or "unknown"),
+        reason=str((route_payload.get("risk_summary") or {}).get("boundary") or ""),
+        evidence={
+            "route_id": route_payload.get("route_id"),
+            "route_epoch": route_payload.get("route_epoch"),
+            "confidence": route_payload.get("confidence"),
+            "matched_terms": route_payload.get("matched_terms", []),
+            "searched_scopes": route_payload.get("searched_scopes", []),
+            "tool_candidates": route_payload.get("tool_candidates", []),
+            "reroute_triggers": pending_reroute.get("triggers", []),
+        },
+    )
+    event_type = "intent_route_reroute_completed" if route_epoch > 0 or reroute_reason else "intent_route_completed"
+    yield _event(
+        state,
+        event_type,
+        "intent_route",
+        "Intent route completed",
+        route_payload,
+    )
+
+
 async def _select_tools_node(
     state: AgentState,
     deps: AgentDeps,
@@ -544,6 +652,13 @@ async def _select_tools_node(
     if subagent_instruction:
         state.snapshots["subagent_tool_instruction"] = subagent_instruction
     proposed = await _propose_tool_calls(deps.tool_registry, state, settings)
+    route_payload = dict(state.intent_route_plan or state.snapshots.get("intent_route_plan") or {})
+    if route_payload.get("proposed_tool_calls") != proposed:
+        route_payload["proposed_tool_calls"] = proposed
+        risk_summary = dict(route_payload.get("risk_summary") or {})
+        risk_summary["proposed_call_count"] = len(proposed)
+        route_payload["risk_summary"] = risk_summary
+        _store_intent_route_plan(state, route_payload, node="select_tools")
     state.snapshots["proposed_tool_calls"] = proposed
 
     if state.selected_skills:
@@ -639,6 +754,8 @@ async def _execute_tools_node(
     cutoff_event_emitted = False
 
     pending = [dict(call) for call in proposed if isinstance(call, Mapping)]
+    async for event in _prefetch_initial_readonly_tools(state, deps, settings, pending, available_tools, cutoff):
+        yield event
     index = 0
     while index < len(pending):
         call = pending[index]
@@ -866,7 +983,7 @@ async def _execute_tools_node(
                     arguments=arguments,
                 )
             else:
-                raw_result = await _call_tool(deps.tool_registry, name, arguments)
+                raw_result = await _cached_tool_call(state, deps.tool_registry, name, arguments)
         except Exception as exc:
             if name == "task":
                 yield _event(
@@ -900,7 +1017,7 @@ async def _execute_tools_node(
                     state,
                     "error_recovery_retry",
                     "execute_tools",
-                    f"Tool {name} 失败，将重试 ({reason})",
+                    f"Tool {name} failed: {reason}",
                     {
                         "name": name,
                         "error_code": classification.error_code,
@@ -917,7 +1034,7 @@ async def _execute_tools_node(
                 state,
                 "error",
                 "execute_tools",
-                f"Tool {name} 失败：{reason}",
+                f"Tool {name} failed: {reason}",
                 {
                     "error_type": type(exc).__name__,
                     "error_code": classification.error_code,
@@ -925,7 +1042,7 @@ async def _execute_tools_node(
                 },
             )
             state.blocked = True
-            state.block_reason = f"错误恢复失败: {reason}"
+            state.block_reason = f"Tool execution failed: {reason}"
             yield _event(
                 state,
                 "run_completed",
@@ -934,6 +1051,8 @@ async def _execute_tools_node(
                 {"blocked": True, "reason": state.block_reason},
             )
             return
+
+        _mark_tool_cache_dirty_if_mutating(state, name)
 
         if name == "skill_manage" and tool_result_ok(raw_result):
             async for event in _propose_skill_change_from_tool_result(state, deps, arguments, raw_result):
@@ -971,11 +1090,12 @@ async def _execute_tools_node(
             state.impact_analysis = _extract_tool_result(raw_result)
             state.snapshots["impact_analysis"] = state.impact_analysis
         _refresh_tool_results_block(state)
+        completion_message = f"Tool {name} completed" if raw_result_ok else f"Tool {name} failed"
         yield _event(
             state,
             "tool_call_completed",
             "execute_tools",
-            f"Tool {name} completed",
+            completion_message,
             {"name": name, "result": result, "metadata": output_metadata},
         )
         if isinstance(sandbox_metadata, Mapping):
@@ -1139,6 +1259,20 @@ async def _execute_tools_node(
                 )
 
     state.snapshots["approved_tool_calls"] = approved
+    triggers = reroute_triggers_from_state(state, settings)
+    if triggers:
+        state.route_epoch = int(state.route_epoch or 0) + 1
+        state.snapshots["pending_reroute"] = {
+            "reason": str(triggers[0].get("kind") or "reroute_requested"),
+            "triggers": triggers,
+        }
+        yield _event(
+            state,
+            "intent_route_reroute_requested",
+            "execute_tools",
+            "Intent route requested another bounded routing epoch",
+            {"route_epoch": state.route_epoch, "triggers": triggers},
+        )
 
 
 async def _propose_verified_patch_node(
@@ -1378,6 +1512,7 @@ async def _build_and_store_patch_proposal(
         session_id=state.session_id,
         run_id=state.run_id,
         call_tool=call_tool,
+        impact_analysis=state.impact_analysis,
     )
     stored = await _call_optional(deps.persistence, "create_patch_proposal", proposal=proposal)
     public = (
@@ -1652,51 +1787,99 @@ async def _parallelism_gate_stage(
         state,
         "parallelism_gate_started",
         "parallelism_gate",
-        "Evaluating parallel execution independence conditions",
+        "Evaluating developer parallelism for team workflow",
         {
             "conditions": [
-                "problem_domain_independence",
-                "context_independence",
+                "task_independence",
                 "write_set_independence",
                 "verification_independence",
+                "developer_budget",
             ]
         },
     )
 
-    source_text = "\n\n".join(
-        part
-        for part in [
-            state.user_input,
-            state.plan,
-        ]
-        if part
-    )
-    tasks = extract_task_candidates_from_text(source_text)
-    decision = evaluate_independence(
-        tasks,
-        max_parallel=int(_setting(settings, "max_concurrent_subagents", 3)),
-    )
+    team_plan = dict(state.snapshots.get("team_plan") or {})
+    team_mode = str(team_plan.get("mode") or "") == "team"
     subagent_enabled = bool(_setting(settings, "subagent_enabled", False))
     subagent_policy = str(_setting(settings, "subagent_policy", "off"))
-    suitable = bool(decision.allowed)
-    strategy = "parallel" if suitable and subagent_policy == "auto" and subagent_enabled else "serial"
-    reason = decision.reason
-    if subagent_policy == "off":
-        reason = "subagent_policy_off"
-    elif suitable and not subagent_enabled:
-        reason = "subagent_disabled"
-    decision_payload = {
-        **decision.to_dict(),
-        "strategy": strategy,
-        "suitable": suitable,
-        "reason": reason,
-        "task_count": len(tasks),
-        "candidates": [task.to_dict() for task in tasks],
-        "subagent_enabled": subagent_enabled,
-        "subagent_policy": subagent_policy,
-    }
 
-    state.task_candidates = [task.to_dict() for task in tasks]
+    if team_mode:
+        max_developers = _team_max_developers(settings)
+        tasks = _team_tasks_from_plan(team_plan)
+        candidate_assignments = _team_developer_assignments(tasks, max_developers=max_developers) if tasks else []
+        suitable = len(candidate_assignments) > 1
+        strategy = "parallel" if suitable and subagent_policy == "auto" and subagent_enabled else "serial"
+        reason = "developer_assignments_are_independent" if suitable else "insufficient_independent_developer_work"
+        if subagent_policy == "off":
+            reason = "subagent_policy_off"
+        elif suitable and not subagent_enabled:
+            reason = "subagent_disabled"
+        assignments = candidate_assignments
+        if strategy != "parallel" and tasks:
+            assignments = [_team_assignment(tasks, developer_index=1)]
+        verify_commands = _dedupe_preserve_order(
+            command
+            for assignment in assignments
+            for command in assignment.get("verify_commands", [])
+            if isinstance(command, str) and command.strip()
+        )
+        decision_payload = {
+            "mode": "developer_parallelism",
+            "allowed": suitable,
+            "suitable": suitable,
+            "strategy": strategy,
+            "reason": reason,
+            "task_count": len(tasks),
+            "developer_count": len(assignments),
+            "max_developer_agents": max_developers,
+            "candidates": tasks,
+            "assignments": assignments,
+            "subagent_enabled": subagent_enabled,
+            "subagent_policy": subagent_policy,
+            "conflict_risk": "low" if suitable else "medium",
+        }
+        team_plan["assignments"] = assignments
+        team_plan["verify_commands"] = verify_commands
+        team_plan["developer_parallelism"] = decision_payload
+        team_plan["max_developer_agents"] = max_developers
+        state.snapshots["team_plan"] = team_plan
+        state.task_candidates = tasks
+    else:
+        source_text = "\n\n".join(
+            part
+            for part in [
+                state.user_input,
+                state.plan,
+            ]
+            if part
+        )
+        task_candidates = extract_task_candidates_from_text(source_text)
+        decision = evaluate_independence(
+            task_candidates,
+            max_parallel=int(_setting(settings, "max_concurrent_subagents", 3)),
+        )
+        suitable = bool(decision.allowed)
+        strategy = "parallel" if suitable and subagent_policy == "auto" and subagent_enabled else "serial"
+        reason = decision.reason
+        if subagent_policy == "off":
+            reason = "subagent_policy_off"
+        elif suitable and not subagent_enabled:
+            reason = "subagent_disabled"
+        tasks = [task.to_dict() for task in task_candidates]
+        decision_payload = {
+            **decision.to_dict(),
+            "mode": "legacy_task_parallelism",
+            "strategy": strategy,
+            "suitable": suitable,
+            "reason": reason,
+            "task_count": len(task_candidates),
+            "developer_count": len(tasks) if strategy == "parallel" else 1,
+            "candidates": tasks,
+            "subagent_enabled": subagent_enabled,
+            "subagent_policy": subagent_policy,
+        }
+        state.task_candidates = tasks
+
     state.parallelism_decision = decision_payload
     state.execution_strategy = strategy
     state.snapshots["task_candidates"] = state.task_candidates
@@ -1707,17 +1890,16 @@ async def _parallelism_gate_stage(
         state,
         "parallelism_decision_completed",
         "parallelism_gate",
-        f"Parallelism decision: {strategy}",
+        f"Developer parallelism decision: {strategy}",
         decision_payload,
     )
     yield _event(
         state,
         "parallelism_gate_completed",
         "parallelism_gate",
-        f"Parallelism decision: {strategy}",
+        f"Developer parallelism decision: {strategy}",
         decision_payload,
     )
-
 
 async def _parallel_dispatch_stage(
     state: AgentState,
@@ -1942,19 +2124,13 @@ async def _team_plan_stage(
             "verify_commands": [],
         }]
 
-    assignments = _team_developer_assignments(tasks, max_developers=max_developers)
-    verify_commands = _dedupe_preserve_order(
-        command
-        for assignment in assignments
-        for command in assignment.get("verify_commands", [])
-        if isinstance(command, str) and command.strip()
-    )
     plan = {
         "mode": "team",
         "roles": ["planner", "developer", "tester", "supervisor"],
         "max_developer_agents": max_developers,
-        "assignments": assignments,
-        "verify_commands": verify_commands,
+        "tasks": tasks,
+        "assignments": [],
+        "verify_commands": [],
         "acceptance_criteria": [
             "developer patch request is valid",
             "sandbox preview/apply succeeds when an isolated workspace is available",
@@ -1963,17 +2139,17 @@ async def _team_plan_stage(
         ],
     }
     state.snapshots["team_plan"] = plan
-    state.review_reports["team_plan"] = {"status": "prepared", "assignment_count": len(assignments)}
+    state.review_reports["team_plan"] = {"status": "prepared", "task_count": len(tasks)}
     state.context.append({
         "source": "team_plan",
         "content": json.dumps(plan, ensure_ascii=False, indent=2),
-        "metadata": {"mode": "team", "assignment_count": len(assignments)},
+        "metadata": {"mode": "team", "task_count": len(tasks)},
     })
     yield _event(
         state,
         "team_plan_completed",
         "team_plan",
-        f"Prepared {len(assignments)} developer assignment(s)",
+        f"Prepared {len(tasks)} developer task(s)",
         plan,
     )
 
@@ -2412,10 +2588,18 @@ _TEAM_SANDBOX_DIFF_EXCLUDES = {
 
 
 class _TeamSandboxToolLedger:
-    def __init__(self, registry: Any, *, workspace_root: Path, sandbox_root: Path) -> None:
+    def __init__(
+        self,
+        registry: Any,
+        *,
+        workspace_root: Path,
+        sandbox_root: Path,
+        workspace_backend: str = "copy",
+    ) -> None:
         self.registry = registry
         self.workspace_root = workspace_root.resolve()
         self.sandbox_root = sandbox_root.resolve()
+        self.workspace_backend = workspace_backend
         self.calls: list[dict[str, Any]] = []
 
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -2451,7 +2635,6 @@ class _TeamSandboxToolLedger:
             if getattr(spec, "name", "") in _TEAM_DEVELOPER_TOOL_NAMES
         ]
 
-
 def _team_developer_tool_loop_available(provider: ChatProvider, tool_registry: Any | None) -> bool:
     if not bool(getattr(provider, "supports_tool_calling", False)):
         return False
@@ -2476,8 +2659,7 @@ async def _run_team_developer_tool_loop(
     iteration: int,
     developer_outputs: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    sandbox_registry, ledger = _team_sandbox_registry_and_ledger(deps.tool_registry, settings)
-    if sandbox_registry is None or ledger is None:
+    if deps.tool_registry is None:
         return {
             "status": "needs_fix",
             "summary": "",
@@ -2486,8 +2668,113 @@ async def _run_team_developer_tool_loop(
             "error": "isolated command workspace is not configured",
         }
 
-    response_parts: list[str] = []
+    command_root = getattr(deps.tool_registry, "command_workspace_root", None)
+    workspace_root = getattr(deps.tool_registry, "workspace_root", _setting(settings, "workspace_root", None))
+    if not command_root or not workspace_root or Path(command_root).resolve() == Path(workspace_root).resolve():
+        return {
+            "status": "needs_fix",
+            "summary": "",
+            "changed_files": [],
+            "sandbox_applied": False,
+            "error": "isolated command workspace is not configured",
+        }
+
+    assignment_outputs = await asyncio.gather(
+        *[
+            _run_team_developer_assignment_tool_loop(
+                state=state,
+                provider=provider,
+                deps=deps,
+                settings=settings,
+                team_plan=team_plan,
+                previous_report=previous_report,
+                assignment=assignment,
+                iteration=iteration,
+                assignment_index=index,
+            )
+            for index, assignment in enumerate(assignments, start=1)
+        ]
+    )
+    developer_outputs.extend(assignment_outputs)
+
+    developer_workspaces = [
+        _team_developer_workspace_entry(output)
+        for output in assignment_outputs
+        if output.get("sandbox_root")
+    ]
+    changed_files = _dedupe_preserve_order(
+        path for output in assignment_outputs for path in output.get("changed_files") or []
+    )
+    conflicts = _team_developer_workspace_conflicts(developer_workspaces)
+    failed_outputs = [output for output in assignment_outputs if output.get("status") != "completed"]
+    summary = "\n".join(
+        str(output.get("summary") or "").strip() for output in assignment_outputs if output.get("summary")
+    ).strip()
+    diff = _combine_team_developer_diffs(assignment_outputs)
+    status = "completed" if changed_files and not failed_outputs and not conflicts else "needs_fix"
+    output: dict[str, Any] = {
+        "status": status,
+        "summary": summary or "Team developer tool loop completed",
+        "changed_files": changed_files,
+        "diff": diff,
+        "sandbox_diff": diff,
+        "sandbox_applied": status == "completed",
+        "developer_workspaces": developer_workspaces,
+        "tool_ledger": [call for item in assignment_outputs for call in item.get("tool_ledger") or []],
+        "verification": [item for output_item in assignment_outputs for item in output_item.get("verification") or []],
+        "tool_loop": True,
+    }
+    if developer_workspaces:
+        output["sandbox_root"] = developer_workspaces[0].get("sandbox_root")
+    if conflicts:
+        output["merge_conflicts"] = conflicts
+        output["error"] = "developer workspaces changed overlapping files"
+    elif failed_outputs:
+        output["error"] = "; ".join(
+            str(item.get("error") or f"{item.get('developer_id', 'developer')} did not complete")
+            for item in failed_outputs
+        )
+    elif not changed_files:
+        output["error"] = "developer tool loop produced no sandbox diff"
+    return output
+
+
+async def _run_team_developer_assignment_tool_loop(
+    *,
+    state: AgentState,
+    provider: ChatProvider,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+    team_plan: Mapping[str, Any],
+    previous_report: Mapping[str, Any],
+    assignment: Mapping[str, Any],
+    iteration: int,
+    assignment_index: int,
+) -> dict[str, Any]:
+    developer_id = str(assignment.get("developer_id") or f"developer-{assignment_index}")
+    task_id = f"{developer_id}-iter-{iteration}"
+    sandbox_registry: Any | None = None
+    ledger: _TeamSandboxToolLedger | None = None
+    response = ""
     try:
+        sandbox_registry, ledger = _team_sandbox_registry_and_ledger(
+            deps.tool_registry,
+            settings,
+            developer_id=developer_id,
+            iteration=iteration,
+        )
+        if sandbox_registry is None or ledger is None:
+            return {
+                "task_id": task_id,
+                "developer_id": developer_id,
+                "status": "needs_fix",
+                "summary": "",
+                "changed_files": [],
+                "sandbox_applied": False,
+                "tool_loop": True,
+                "error": "isolated command workspace is not configured",
+            }
+
         from langchain_core.messages import HumanMessage
         from langgraph.prebuilt import create_react_agent
 
@@ -2509,36 +2796,28 @@ async def _run_team_developer_tool_loop(
             max_tokens=int(_setting(settings, "patch_max_tokens", 1400)),
         )
         agent = create_react_agent(model=model, tools=tools, prompt=_TEAM_DEVELOPER_TOOL_SYSTEM_PROMPT)
-        for assignment in assignments:
-            developer_id = str(assignment.get("developer_id") or f"developer-{len(response_parts) + 1}")
-            prompt = _team_developer_tool_prompt(state, team_plan, previous_report, assignment)
-            response = ""
-            async for chunk in agent.astream(
-                {"messages": [HumanMessage(content=prompt)]},
-                config={"recursion_limit": 18},
-                stream_mode="values",
-            ):
-                messages = chunk.get("messages", []) if isinstance(chunk, Mapping) else []
-                last_msg = messages[-1] if messages else None
-                content = getattr(last_msg, "content", None)
-                if isinstance(content, str) and content:
-                    response = content
-            response_parts.append(response.strip())
-            developer_outputs.append({
-                "task_id": f"{developer_id}-iter-{iteration}",
-                "developer_id": developer_id,
-                "status": "completed",
-                "summary": response.strip(),
-                "changed_files": [],
-                "tool_loop": True,
-            })
+        prompt = _team_developer_tool_prompt(state, team_plan, previous_report, assignment)
+        async for chunk in agent.astream(
+            {"messages": [HumanMessage(content=prompt)]},
+            config={"recursion_limit": 18},
+            stream_mode="values",
+        ):
+            messages = chunk.get("messages", []) if isinstance(chunk, Mapping) else []
+            last_msg = messages[-1] if messages else None
+            content = getattr(last_msg, "content", None)
+            if isinstance(content, str) and content:
+                response = content
     except Exception as exc:
         return {
+            "task_id": task_id,
+            "developer_id": developer_id,
             "status": "needs_fix",
-            "summary": "\n".join(part for part in response_parts if part),
+            "summary": response.strip(),
             "changed_files": [],
             "sandbox_applied": False,
-            "tool_ledger": ledger.calls,
+            "sandbox_root": str(ledger.sandbox_root) if ledger is not None else None,
+            "tool_ledger": list(ledger.calls) if ledger is not None else [],
+            "tool_loop": True,
             "error": str(exc),
         }
 
@@ -2546,11 +2825,12 @@ async def _run_team_developer_tool_loop(
     diff_payload = dict(diff_result.get("result") or {})
     changed_files = [str(path) for path in diff_payload.get("changed_files") or []]
     verification = _team_developer_verification_from_ledger(ledger.calls)
-    summary = "\n".join(part for part in response_parts if part).strip() or "Team developer tool loop completed"
     status = "completed" if changed_files else "needs_fix"
     output = {
+        "task_id": task_id,
+        "developer_id": developer_id,
         "status": status,
-        "summary": summary,
+        "summary": response.strip(),
         "changed_files": changed_files,
         "diff": str(diff_payload.get("diff") or ""),
         "sandbox_diff": str(diff_payload.get("diff") or ""),
@@ -2562,15 +2842,14 @@ async def _run_team_developer_tool_loop(
     }
     if status == "needs_fix":
         output["error"] = "developer tool loop produced no sandbox diff"
-    for developer_output in developer_outputs:
-        developer_output["changed_files"] = changed_files
-        developer_output["status"] = status
     return output
-
 
 def _team_sandbox_registry_and_ledger(
     tool_registry: Any | None,
     settings: AgentSettings | Mapping[str, Any],
+    *,
+    developer_id: str | None = None,
+    iteration: int | None = None,
 ) -> tuple[Any | None, _TeamSandboxToolLedger | None]:
     if tool_registry is None:
         return None, None
@@ -2582,6 +2861,14 @@ def _team_sandbox_registry_and_ledger(
     sandbox_path = Path(command_root).resolve()
     if workspace_path == sandbox_path:
         return None, None
+    workspace_backend = "copy"
+    if developer_id:
+        sandbox_path, workspace_backend = _prepare_team_developer_workspace(
+            sandbox_path,
+            workspace_root=workspace_path,
+            developer_id=developer_id,
+            iteration=iteration or 1,
+        )
     sandbox_registry = create_default_registry(
         sandbox_path,
         is_plan_mode=True,
@@ -2598,7 +2885,181 @@ def _team_sandbox_registry_and_ledger(
         sandbox_registry,
         workspace_root=workspace_path,
         sandbox_root=sandbox_path,
+        workspace_backend=workspace_backend,
     )
+
+def _prepare_team_developer_workspace(
+    template_root: Path,
+    *,
+    workspace_root: Path,
+    developer_id: str,
+    iteration: int,
+) -> tuple[Path, str]:
+    template = Path(template_root).resolve()
+    workspace = Path(workspace_root).resolve()
+    if not template.is_dir():
+        raise PatchProposalError(f"team command workspace does not exist: {template}")
+    developers_root = (template.parent / "developers" / f"iter-{max(1, int(iteration))}").resolve()
+    developers_root.mkdir(parents=True, exist_ok=True)
+    target = (developers_root / _safe_team_workspace_segment(developer_id)).resolve()
+    try:
+        target.relative_to(developers_root)
+    except ValueError as exc:
+        raise PatchProposalError(f"team developer workspace path escapes sandbox root: {developer_id}") from exc
+
+    _remove_team_developer_workspace_target(target, developers_root=developers_root, workspace_root=workspace)
+    if _try_prepare_team_developer_worktree(workspace, target):
+        _incremental_overlay_team_workspace(template, target)
+        return target, "git_worktree_overlay"
+
+    shutil.copytree(
+        template,
+        target,
+        ignore=_ignore_team_developer_workspace_entries,
+        symlinks=True,
+    )
+    return target, "copy"
+
+
+def _remove_team_developer_workspace_target(target: Path, *, developers_root: Path, workspace_root: Path) -> None:
+    resolved = Path(target).resolve()
+    try:
+        resolved.relative_to(Path(developers_root).resolve())
+    except ValueError as exc:
+        raise PatchProposalError(f"team developer workspace path escapes sandbox root: {target}") from exc
+    if not resolved.exists():
+        return
+    _run_team_git(workspace_root, ["worktree", "remove", "--force", str(resolved)], timeout_seconds=30)
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
+def _try_prepare_team_developer_worktree(workspace_root: Path, target: Path) -> bool:
+    if not _team_workspace_is_git_repo(workspace_root):
+        return False
+    completed = _run_team_git(workspace_root, ["worktree", "add", "--detach", str(target), "HEAD"], timeout_seconds=60)
+    if completed.returncode == 0:
+        return True
+    shutil.rmtree(target, ignore_errors=True)
+    return False
+
+
+def _team_workspace_is_git_repo(workspace_root: Path) -> bool:
+    return _run_team_git(workspace_root, ["rev-parse", "--is-inside-work-tree"], timeout_seconds=20).returncode == 0
+
+
+def _run_team_git(root: Path, args: list[str], *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return subprocess.CompletedProcess(["git", *args], returncode=1, stdout="", stderr="")
+
+
+def _incremental_overlay_team_workspace(source_root: Path, target_root: Path) -> None:
+    source = Path(source_root).resolve()
+    target = Path(target_root).resolve()
+    source_files: set[str] = set()
+    for item in source.rglob("*"):
+        if item.is_dir() or _team_workspace_path_excluded(item, source):
+            continue
+        rel = item.relative_to(source)
+        source_files.add(rel.as_posix())
+        destination = target / rel
+        if destination.is_file() and _same_file_bytes(item, destination):
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, destination, follow_symlinks=False)
+
+    for item in target.rglob("*"):
+        if item.is_dir() or _team_workspace_path_excluded(item, target):
+            continue
+        rel = item.relative_to(target).as_posix()
+        if rel in source_files:
+            continue
+        try:
+            item.unlink()
+        except OSError:
+            continue
+
+
+def _same_file_bytes(left: Path, right: Path) -> bool:
+    try:
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        with left.open("rb") as left_handle, right.open("rb") as right_handle:
+            while True:
+                left_chunk = left_handle.read(1024 * 1024)
+                right_chunk = right_handle.read(1024 * 1024)
+                if left_chunk != right_chunk:
+                    return False
+                if not left_chunk:
+                    return True
+    except OSError:
+        return False
+
+
+def _team_workspace_path_excluded(path: Path, root: Path) -> bool:
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        parts = path.parts
+    return bool(set(parts) & _TEAM_SANDBOX_DIFF_EXCLUDES) or path.is_symlink()
+
+
+def _ignore_team_developer_workspace_entries(directory: str, names: list[str]) -> set[str]:
+    base = Path(directory)
+    ignored: set[str] = set()
+    for name in names:
+        candidate = base / name
+        if name in _TEAM_SANDBOX_DIFF_EXCLUDES or candidate.is_symlink():
+            ignored.add(name)
+    return ignored
+
+def _safe_team_workspace_segment(value: str) -> str:
+    safe = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in str(value).strip())
+    return safe[:80] or "developer"
+
+
+def _team_developer_workspace_entry(output: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": str(output.get("task_id") or ""),
+        "developer_id": str(output.get("developer_id") or "developer"),
+        "status": str(output.get("status") or "unknown"),
+        "sandbox_root": str(output.get("sandbox_root") or ""),
+        "changed_files": list(output.get("changed_files") or []),
+        "diff": str(output.get("diff") or output.get("sandbox_diff") or ""),
+    }
+
+
+def _team_developer_workspace_conflicts(workspaces: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    owners: dict[str, str] = {}
+    conflicts: list[dict[str, Any]] = []
+    for workspace in workspaces:
+        developer_id = str(workspace.get("developer_id") or "developer")
+        for rel_path in _dedupe_preserve_order(workspace.get("changed_files") or []):
+            previous = owners.get(rel_path)
+            if previous and previous != developer_id:
+                conflicts.append({"path": rel_path, "developers": [previous, developer_id]})
+            else:
+                owners[rel_path] = developer_id
+    return conflicts
+
+
+def _combine_team_developer_diffs(outputs: Iterable[Mapping[str, Any]]) -> str:
+    parts: list[str] = []
+    for output in outputs:
+        diff = str(output.get("diff") or output.get("sandbox_diff") or "").strip()
+        if not diff:
+            continue
+        developer_id = str(output.get("developer_id") or "developer")
+        parts.append(f"# developer workspace: {developer_id}\n{diff}")
+    return "\n".join(parts)
 
 
 def _team_developer_tool_prompt(
@@ -2647,12 +3108,74 @@ def _patch_request_from_team_sandbox_output(
 ) -> PatchRequest:
     tool_registry = deps.tool_registry
     workspace_root = Path(getattr(tool_registry, "workspace_root", "")).resolve()
-    sandbox_root = Path(str(output.get("sandbox_root") or getattr(tool_registry, "command_workspace_root", ""))).resolve()
-    changed_files = [str(path) for path in output.get("changed_files") or [] if str(path).strip()]
-    if not changed_files:
-        diff_result = _sandbox_git_diff_result(workspace_root, sandbox_root)
-        changed_files = [str(path) for path in (diff_result.get("result") or {}).get("changed_files") or []]
+    workspace_entries = [
+        dict(item)
+        for item in output.get("developer_workspaces") or []
+        if isinstance(item, Mapping) and item.get("sandbox_root")
+    ]
+    if workspace_entries:
+        edits = _patch_edits_from_team_developer_workspaces(
+            workspace_root=workspace_root,
+            workspace_entries=workspace_entries,
+        )
+    else:
+        sandbox_root = Path(str(output.get("sandbox_root") or getattr(tool_registry, "command_workspace_root", ""))).resolve()
+        changed_files = [str(path) for path in output.get("changed_files") or [] if str(path).strip()]
+        if not changed_files:
+            diff_result = _sandbox_git_diff_result(workspace_root, sandbox_root)
+            changed_files = [str(path) for path in (diff_result.get("result") or {}).get("changed_files") or []]
+        edits = _patch_edits_from_team_workspace(
+            workspace_root=workspace_root,
+            sandbox_root=sandbox_root,
+            changed_files=changed_files,
+            reason="team developer sandbox result",
+        )
 
+    if not edits:
+        raise PatchProposalError("team sandbox produced no reconstructable text edits")
+    summary = str(output.get("summary") or state.plan or "Team developer sandbox changes")
+    return PatchRequest(summary=summary, edits=edits)
+
+
+def _patch_edits_from_team_developer_workspaces(
+    *,
+    workspace_root: Path,
+    workspace_entries: Iterable[Mapping[str, Any]],
+) -> list[PatchEdit]:
+    edits: list[PatchEdit] = []
+    owners: dict[str, str] = {}
+    for entry in workspace_entries:
+        developer_id = str(entry.get("developer_id") or "developer")
+        sandbox_root = Path(str(entry.get("sandbox_root") or "")).resolve()
+        changed_files = [str(path) for path in entry.get("changed_files") or [] if str(path).strip()]
+        if not changed_files:
+            diff_result = _sandbox_git_diff_result(workspace_root, sandbox_root)
+            changed_files = [str(path) for path in (diff_result.get("result") or {}).get("changed_files") or []]
+        for rel_path in _dedupe_preserve_order(changed_files):
+            previous = owners.get(rel_path)
+            if previous and previous != developer_id:
+                raise PatchProposalError(
+                    f"team developer workspace merge conflict on {rel_path}: {previous} and {developer_id}"
+                )
+            candidate_edits = _patch_edits_from_team_workspace(
+                workspace_root=workspace_root,
+                sandbox_root=sandbox_root,
+                changed_files=[rel_path],
+                reason=f"team developer sandbox result from {developer_id}",
+            )
+            if candidate_edits:
+                owners[rel_path] = developer_id
+                edits.extend(candidate_edits)
+    return edits
+
+
+def _patch_edits_from_team_workspace(
+    *,
+    workspace_root: Path,
+    sandbox_root: Path,
+    changed_files: Iterable[str],
+    reason: str,
+) -> list[PatchEdit]:
     edits: list[PatchEdit] = []
     for rel_path in _dedupe_preserve_order(changed_files):
         main_path = _resolve_team_relative_file(workspace_root, rel_path)
@@ -2669,14 +3192,10 @@ def _patch_request_from_team_sandbox_output(
                 old_text=original,
                 new_text=updated,
                 expected_hash=_sha256_file(main_path),
-                reason="team developer sandbox result",
+                reason=reason,
             )
         )
-    if not edits:
-        raise PatchProposalError("team sandbox produced no reconstructable text edits")
-    summary = str(output.get("summary") or state.plan or "Team developer sandbox changes")
-    return PatchRequest(summary=summary, edits=edits)
-
+    return edits
 
 def _sandbox_git_diff_result(workspace_root: Path, sandbox_root: Path, *, path: Any = None) -> dict[str, Any]:
     workspace = Path(workspace_root).resolve()
@@ -2841,25 +3360,49 @@ def _team_task_from_item(item: Mapping[str, Any], *, index: int) -> dict[str, An
     }
 
 
-def _team_developer_assignments(tasks: list[dict[str, Any]], *, max_developers: int) -> list[dict[str, Any]]:
-    if max_developers <= 1 or len(tasks) <= 1:
-        return [_team_assignment(tasks[:1], developer_index=1)]
+def _team_tasks_from_plan(team_plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    tasks = [dict(task) for task in team_plan.get("tasks") or [] if isinstance(task, Mapping)]
+    if tasks:
+        return tasks
+    extracted: list[dict[str, Any]] = []
+    for assignment in team_plan.get("assignments") or []:
+        if not isinstance(assignment, Mapping):
+            continue
+        extracted.extend(dict(task) for task in assignment.get("tasks") or [] if isinstance(task, Mapping))
+    return extracted
 
-    selected: list[dict[str, Any]] = []
+
+def _team_developer_assignments(tasks: list[dict[str, Any]], *, max_developers: int) -> list[dict[str, Any]]:
+    if not tasks:
+        return []
+    if max_developers <= 1 or len(tasks) <= 1:
+        return [_team_assignment(tasks, developer_index=1)]
+
+    task_write_sets: list[set[str]] = []
     seen_writes: set[str] = set()
     for task in tasks:
         write_paths = {str(path) for path in task.get("write_paths") or [] if str(path).strip()}
         if not write_paths or seen_writes.intersection(write_paths):
-            continue
-        selected.append(task)
+            return [_team_assignment(tasks, developer_index=1)]
         seen_writes.update(write_paths)
-        if len(selected) >= max_developers:
-            break
+        task_write_sets.append(write_paths)
 
-    if len(selected) < 2:
-        return [_team_assignment(tasks[:1], developer_index=1)]
-    return [_team_assignment([task], developer_index=index) for index, task in enumerate(selected, start=1)]
+    developer_count = min(max_developers, len(tasks))
+    groups: list[list[dict[str, Any]]] = [[] for _ in range(developer_count)]
+    group_writes: list[set[str]] = [set() for _ in range(developer_count)]
+    for task, write_paths in zip(tasks, task_write_sets, strict=False):
+        target_index = min(range(developer_count), key=lambda index: len(groups[index]))
+        if group_writes[target_index].intersection(write_paths):
+            return [_team_assignment(tasks, developer_index=1)]
+        groups[target_index].append(task)
+        group_writes[target_index].update(write_paths)
 
+    assignments = [
+        _team_assignment(group, developer_index=index)
+        for index, group in enumerate(groups, start=1)
+        if group
+    ]
+    return assignments if len(assignments) > 1 else [_team_assignment(tasks, developer_index=1)]
 
 def _team_assignment(tasks: list[dict[str, Any]], *, developer_index: int) -> dict[str, Any]:
     read_paths = _dedupe_preserve_order(path for task in tasks for path in task.get("read_paths") or [])
@@ -3008,6 +3551,7 @@ async def _apply_patch_request_in_team_sandbox(
         session_id=state.session_id,
         run_id=state.run_id,
         call_tool=sandbox_call_tool,
+        impact_analysis=state.impact_analysis,
     )
     apply_results: list[Any] = []
     for edit in proposal.edits:
@@ -3084,6 +3628,8 @@ def _sandbox_artifacts_from_team_output(state: AgentState, output: Mapping[str, 
         "diff": str(output.get("diff") or output.get("sandbox_diff") or ""),
         "tool_ledger": list(output.get("tool_ledger") or []),
         "verification": list(output.get("verification") or []),
+        "developer_workspaces": list(output.get("developer_workspaces") or []),
+        "merge_conflicts": list(output.get("merge_conflicts") or []),
         "developer_summary": str(output.get("summary") or ""),
         "status": str(output.get("status") or "unknown"),
     }
@@ -3325,213 +3871,12 @@ async def _propose_tool_calls(
     state: AgentState,
     settings: AgentSettings | Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    if tool_registry is None:
-        return []
-
-    available = await _available_tool_names(tool_registry)
-    max_calls = int(_setting(settings, "max_tool_calls", 3))
-    calls: list[dict[str, Any]] = []
-    task = state.user_input.strip()
-    task_lc = task.lower()
-    plan_lc = state.plan.lower()
-
-    if (
-        "select_relevant_skills" in available
-        and not state.selected_skills
-        and not state.snapshots.get("skill_selection_attempted")
-    ):
-        calls.append(
-            {
-                "name": "select_relevant_skills",
-                "arguments": {"task": task, "plan": state.plan, "max_skills": 3},
-                "category": "skill",
-            }
-        )
-    elif "list_skills" in available and _mentions_skill(task_lc, plan_lc):
-        calls.append({"name": "list_skills", "arguments": {}, "category": "skill"})
-
-    if _mentions_code_task(task, state.plan):
-        if "code_map" in available and not state.code_map_summary:
-            calls.append(
-                {
-                    "name": "code_map",
-                    "arguments": {"path": ".", "max_files": int(_setting(settings, "context_file_limit", 80))},
-                    "category": "code_intelligence",
-                }
-            )
-        if "analyze_impact" in available and not state.impact_analysis:
-            path_hint = _extract_path_hint(task)
-            calls.append(
-                {
-                    "name": "analyze_impact",
-                    "arguments": {
-                        "paths": [path_hint] if path_hint else [],
-                        "symbols": _extract_symbol_hints(task),
-                        "include_tests": True,
-                    },
-                    "category": "code_intelligence",
-                }
-            )
-
-    decision = state.snapshots.get("parallelism_decision") or state.parallelism_decision or {}
-    subagent_enabled = bool(decision.get("subagent_enabled", False))
-    subagent_policy = str(decision.get("subagent_policy", _setting(settings, "subagent_policy", "off")))
-    suitable_for_task = bool(decision.get("suitable", decision.get("allowed", False)))
-    strategy = str(decision.get("strategy", "serial"))
-    candidates = decision.get("candidates") or decision.get("tasks") or []
-    if (
-        "task" in available
-        and subagent_enabled
-        and subagent_policy == "auto"
-        and suitable_for_task
-        and strategy == "parallel"
-        and len(candidates) >= 2
-    ):
-        remaining = max(0, max_calls - len(calls))
-        for candidate in candidates[:remaining]:
-            if not isinstance(candidate, Mapping):
-                continue
-            description = str(candidate.get("title") or candidate.get("description") or candidate.get("id") or "Subtask")
-            read_paths = [
-                str(path)
-                for path in [
-                    *(candidate.get("read_paths") or []),
-                    *(candidate.get("write_paths") or []),
-                ]
-                if str(path).strip()
-            ]
-            prompt_parts = [
-                f"Subtask: {description}",
-                f"Parent user task: {state.user_input}",
-                f"Parent plan: {state.plan or '(no plan)'}",
-                f"Candidate metadata: {candidate}",
-                "Return concise structured findings and evidence for the main agent to synthesize. Do not edit files.",
-            ]
-            calls.append(
-                {
-                    "name": "task",
-                    "arguments": {
-                        "description": description,
-                        "prompt": "\n\n".join(prompt_parts),
-                        "subagent_type": str(candidate.get("subagent_type") or "general-purpose"),
-                        "read_paths": read_paths,
-                        "allowed_tools": ["workspace_snapshot", "list_files", "read_file", "search_text"],
-                    },
-                    "category": "subagent",
-                }
-            )
-
-    requested_skill_names = _requested_skill_views(state)
-    if "skill_view" in available:
-        for skill_name in requested_skill_names[: max(0, max_calls - len(calls))]:
-            calls.append(
-                {
-                    "name": "skill_view",
-                    "arguments": {"name": skill_name},
-                    "category": "skill",
-                }
-            )
-    if "skill_recipe_list" in available:
-        for skill_name in requested_skill_names[: max(0, max_calls - len(calls))]:
-            calls.append(
-                {
-                    "name": "skill_recipe_list",
-                    "arguments": {"skill_name": skill_name, "query": task, "max_entries": 5},
-                    "category": "skill",
-                }
-            )
-
-    if "workspace_snapshot" in available:
-        calls.append(
-            {
-                "name": "workspace_snapshot",
-                "arguments": {
-                    "path": ".",
-                    "max_entries": int(_setting(settings, "context_file_limit", 80)),
-                },
-                "category": "context",
-            }
-        )
-    elif "list_files" in available:
-        calls.append(
-            {
-                "name": "list_files",
-                "arguments": {
-                    "path": ".",
-                    "max_entries": int(_setting(settings, "context_file_limit", 80)),
-                },
-                "category": "context",
-            }
-        )
-
-    path_hint = _extract_path_hint(task)
-    if path_hint and "read_file" in available:
-        calls.append(
-            {
-                "name": "read_file",
-                "arguments": {"path": path_hint},
-                "category": "context",
-            }
-        )
-    elif "search_text" in available and task:
-        calls.append(
-            {
-                "name": "search_text",
-                "arguments": {
-                    "query": task[:200],
-                    "max_matches": int(_setting(settings, "context_search_limit", 20)),
-                },
-                "category": "context",
-            }
-        )
-
-    if _mentions_pytest(task_lc, plan_lc):
-        if "run_command" in available:
-            calls.append(
-                {
-                    "name": "run_command",
-                    "arguments": {
-                        "command": "python",
-                        "args": ["-m", "pytest", "-q"],
-                        "purpose": "Run the test suite requested by the user.",
-                    },
-                    "category": "quality",
-                }
-            )
-        elif "run_pytest" in available:
-            calls.append({"name": "run_pytest", "arguments": {}, "category": "quality"})
-    if _mentions_ruff(task_lc, plan_lc):
-        if "run_command" in available:
-            calls.append(
-                {
-                    "name": "run_command",
-                    "arguments": {
-                        "command": "ruff",
-                        "args": ["check", "."],
-                        "purpose": "Run lint checks requested by the user.",
-                    },
-                    "category": "quality",
-                }
-            )
-        elif "run_ruff_check" in available:
-            calls.append({"name": "run_ruff_check", "arguments": {}, "category": "quality"})
-    if _mentions_format(task_lc, plan_lc):
-        if "run_command" in available:
-            calls.append(
-                {
-                    "name": "run_command",
-                    "arguments": {
-                        "command": "ruff",
-                        "args": ["format", "--check", "."],
-                        "purpose": "Check formatting requested by the user.",
-                    },
-                    "category": "quality",
-                }
-            )
-        elif "run_ruff_format_check" in available:
-            calls.append({"name": "run_ruff_format_check", "arguments": {}, "category": "quality"})
-
-    return _dedupe_tool_calls(calls)[:max_calls]
+    existing_plan = dict(state.intent_route_plan or state.snapshots.get("intent_route_plan") or {})
+    if existing_plan and isinstance(existing_plan.get("proposed_tool_calls"), list):
+        return [dict(call) for call in existing_plan.get("proposed_tool_calls", []) if isinstance(call, Mapping)]
+    route_plan: IntentRoutePlan = await plan_intent_route(tool_registry, state, settings)
+    _store_intent_route_plan(state, route_plan.to_dict(), node="select_tools")
+    return route_plan.proposed_tool_calls
 
 
 async def _available_tool_names(tool_registry: Any, *, include_hidden: bool = False) -> set[str]:
@@ -3574,6 +3919,140 @@ async def _call_tool_if_available(tool_registry: Any | None, name: str, argument
     if name not in available:
         return None
     return await _call_tool(tool_registry, name, arguments)
+
+
+async def _cached_tool_call_if_available(
+    state: AgentState,
+    tool_registry: Any | None,
+    name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    if tool_registry is None:
+        return None
+    available = await _available_tool_names(tool_registry, include_hidden=True)
+    if name not in available:
+        return None
+    return await _cached_tool_call(state, tool_registry, name, arguments)
+
+
+async def _cached_tool_call(
+    state: AgentState,
+    tool_registry: Any | None,
+    name: str,
+    arguments: dict[str, Any],
+) -> Any:
+    if not _tool_cache_enabled_for_call(state, name):
+        return await _call_tool(tool_registry, name, arguments)
+    cache = state.snapshots.setdefault("tool_result_cache", {})
+    key = _tool_cache_key(name, arguments)
+    if key in cache:
+        stats = dict(state.snapshots.get("tool_result_cache_stats") or {})
+        stats["hits"] = int(stats.get("hits", 0)) + 1
+        state.snapshots["tool_result_cache_stats"] = stats
+        return cache[key]
+    result = await _call_tool(tool_registry, name, arguments)
+    cache[key] = _json_safe(result)
+    stats = dict(state.snapshots.get("tool_result_cache_stats") or {})
+    stats["misses"] = int(stats.get("misses", 0)) + 1
+    state.snapshots["tool_result_cache_stats"] = stats
+    return result
+
+
+def _tool_cache_enabled_for_call(state: AgentState, name: str) -> bool:
+    if name not in _CONTEXT_TOOL_CACHE_NAMES:
+        return False
+    return not bool(state.snapshots.get("tool_result_cache_dirty"))
+
+
+def _tool_cache_key(name: str, arguments: Mapping[str, Any]) -> str:
+    return json.dumps(
+        {"name": name, "arguments": dict(arguments)},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _mark_tool_cache_dirty_if_mutating(state: AgentState, name: str) -> None:
+    if name not in _MUTATING_TOOL_NAMES:
+        return
+    state.snapshots["tool_result_cache_dirty"] = True
+    state.snapshots.pop("tool_result_cache", None)
+
+
+def _is_initial_readonly_prefetch_tool(name: str) -> bool:
+    return name in _INITIAL_READONLY_PREFETCH_TOOL_NAMES
+
+
+async def _prefetch_initial_readonly_tools(
+    state: AgentState,
+    deps: AgentDeps,
+    settings: AgentSettings | Mapping[str, Any],
+    pending: list[dict[str, Any]],
+    available_tools: set[str],
+    cutoff: int,
+) -> AsyncIterator[AgentEvent]:
+    del settings
+    if deps.tool_registry is None or not pending or cutoff <= 1:
+        return
+    candidates: list[dict[str, Any]] = []
+    for call in pending[:cutoff]:
+        if not isinstance(call, Mapping):
+            break
+        name = str(call.get("name", ""))
+        if name not in available_tools or not _is_initial_readonly_prefetch_tool(name):
+            break
+        arguments = dict(call.get("arguments") or {})
+        if not _tool_cache_enabled_for_call(state, name):
+            continue
+        if _tool_cache_key(name, arguments) in state.snapshots.get("tool_result_cache", {}):
+            continue
+        protocol_violation = _BEHAVIOR_POLICY.tool_protocol_violation(
+            state,
+            name,
+            arguments,
+            _BEHAVIOR_POLICY.new_tool_protocol_state(state),
+        )
+        if protocol_violation is not None:
+            break
+        inspection = await _inspect(deps.safety_inspector, "tool_call", {**call, "name": name, "arguments": arguments})
+        if not inspection["allowed"]:
+            break
+        candidates.append({"name": name, "arguments": arguments})
+    if len(candidates) <= 1:
+        return
+
+    yield _event(
+        state,
+        "tool_prefetch_started",
+        "execute_tools",
+        "Prefetching initial read-only context tools",
+        {"count": len(candidates), "tools": [candidate["name"] for candidate in candidates]},
+    )
+    results = await asyncio.gather(
+        *[
+            _cached_tool_call(state, deps.tool_registry, candidate["name"], candidate["arguments"])
+            for candidate in candidates
+        ],
+        return_exceptions=True,
+    )
+    failures = [
+        {"name": candidate["name"], "error": str(result)}
+        for candidate, result in zip(candidates, results, strict=False)
+        if isinstance(result, Exception)
+    ]
+    yield _event(
+        state,
+        "tool_prefetch_completed",
+        "execute_tools",
+        "Prefetched initial read-only context tools",
+        {
+            "count": len(candidates),
+            "failed_count": len(failures),
+            "failures": failures[:3],
+            "cache_stats": dict(state.snapshots.get("tool_result_cache_stats") or {}),
+        },
+    )
 
 
 async def _run_subagent_task(
@@ -3884,6 +4363,28 @@ def _event(
     )
 
 
+def _store_intent_route_plan(state: AgentState, route_payload: Mapping[str, Any], *, node: str) -> None:
+    payload = dict(route_payload)
+    state.intent_route_plan = payload
+    state.snapshots["intent_route_plan"] = payload
+    decision = {
+        "node": node,
+        "route_name": "intent_route",
+        "selected": str(payload.get("intent") or "unknown"),
+        "reason": str((payload.get("risk_summary") or {}).get("boundary") or ""),
+        "evidence": {
+            "route_id": payload.get("route_id"),
+            "route_epoch": payload.get("route_epoch"),
+            "confidence": payload.get("confidence"),
+            "matched_terms": payload.get("matched_terms", []),
+            "searched_scopes": payload.get("searched_scopes", []),
+            "tool_candidates": payload.get("tool_candidates", []),
+        },
+    }
+    if not state.route_decisions or state.route_decisions[-1] != decision:
+        state.route_decisions.append(decision)
+
+
 def _normalize_context_items(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -3938,7 +4439,7 @@ def _on_pre_compress(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_memory_insights(payload: Mapping[str, Any]) -> list[str]:
-    markers = ("偏好", "记住", "决策", "未完成", "todo", "prefer", "preference")
+    markers = ("\u504f\u597d", "\u8bb0\u4f4f", "\u51b3\u7b56", "\u672a\u5b8c\u6210", "todo", "prefer", "preference")
     lines: list[str] = []
     for message in payload.get("messages", []):
         if isinstance(message, Mapping):
@@ -3961,7 +4462,7 @@ def _tool_name(tool: Any) -> str:
 
 def _mentions_skill(task_lc: str, plan_lc: str) -> bool:
     text = f"{task_lc}\n{plan_lc}"
-    return any(marker in text for marker in ("skill", "sop", "最佳实践", "规范", "流程"))
+    return any(marker in text for marker in ("skill", "sop", "workflow", "\u6280\u80fd", "\u89c4\u8303", "\u6d41\u7a0b"))
 
 
 def _mentions_code_task(task: str, plan: str = "") -> bool:
@@ -3969,7 +4470,7 @@ def _mentions_code_task(task: str, plan: str = "") -> bool:
     markers = (
         ".py",
         "code",
-        "代码",
+        "\u4ee3\u7801",
         "bug",
         "fix",
         "implement",
@@ -4039,7 +4540,7 @@ def _requested_skill_views(state: AgentState) -> list[str]:
         return explicit_requests
     explicit_slugs = {match.group(1).casefold() for match in re.finditer(r"/([A-Za-z0-9_-]+)", state.user_input or "")}
     plan_lc = (state.plan or "").casefold()
-    plan_mentions_skills = "skill" in plan_lc or "sop" in plan_lc or "技能" in plan_lc
+    plan_mentions_skills = "skill" in plan_lc or "sop" in plan_lc or "\u6280\u80fd" in plan_lc
     requested: list[str] = []
     seen: set[str] = set()
     for skill in indexed:
@@ -4152,17 +4653,17 @@ def _recipe_run_call(
 
 def _mentions_pytest(task_lc: str, plan_lc: str) -> bool:
     text = f"{task_lc}\n{plan_lc}"
-    return any(marker in text for marker in ("pytest", "测试", "test"))
+    return any(marker in text for marker in ("pytest", "test", "\u6d4b\u8bd5"))
 
 
 def _mentions_ruff(task_lc: str, plan_lc: str) -> bool:
     text = f"{task_lc}\n{plan_lc}"
-    return any(marker in text for marker in ("ruff", "lint", "检查", "质量"))
+    return any(marker in text for marker in ("ruff", "lint", "\u68c0\u67e5", "\u8d28\u91cf"))
 
 
 def _mentions_format(task_lc: str, plan_lc: str) -> bool:
     text = f"{task_lc}\n{plan_lc}"
-    return any(marker in text for marker in ("ruff format", "format", "格式"))
+    return any(marker in text for marker in ("ruff format", "format", "\u683c\u5f0f"))
 
 
 def _verified_editing_enabled(settings: AgentSettings | Mapping[str, Any]) -> bool:
@@ -4182,10 +4683,10 @@ def _mentions_verified_edit_request(state: AgentState) -> bool:
             "change",
             "patch",
             "write code",
-            "修改",
-            "修复",
-            "实现",
-            "重构",
+            "\u4fee\u6539",
+            "\u4fee\u590d",
+            "\u5b9e\u73b0",
+            "\u91cd\u6784",
         )
     )
 
@@ -4420,7 +4921,7 @@ async def _run_verification_stage(
             state,
             "verification_skipped",
             "run_verification",
-            "No tool registry available 鈥?verification skipped",
+            "No tool registry available; verification skipped",
             {},
         )
         return
@@ -4505,7 +5006,7 @@ async def _architecture_failure_response_stage(
         f"This likely requires a change in approach or configuration."
     )
     state.blocked = True
-    state.block_reason = "Architecture failure 鈥?repeated errors exceeded recovery limits"
+    state.block_reason = "Architecture failure: repeated errors exceeded recovery limits"
     yield _event(
         state,
         "architecture_failure_response",

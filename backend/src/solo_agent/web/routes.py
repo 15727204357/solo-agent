@@ -40,6 +40,7 @@ class CreateRunRequest(BaseModel):
     conversation_history_enabled: bool | None = None
     run_mode: Literal["agent", "plan"] | None = None
     tool_loop_mode: Literal["heuristic", "model"] | None = None
+    intent_router_mode: Literal["rules", "shadow_hybrid", "hybrid"] | None = None
     approval_mode: Literal["confirm", "manual_only"] | None = None
     workspace_backend: Literal["local", "copy", "docker"] | None = None
     eval_suite_id: str | None = Field(default=None, max_length=120)
@@ -291,6 +292,7 @@ async def create_run(
     )
     run_mode = body.run_mode or "agent"
     tool_loop_mode = body.tool_loop_mode or settings.tool_loop_mode
+    intent_router_mode = body.intent_router_mode or settings.intent_router_mode
     approval_mode = body.approval_mode or settings.approval_mode
     workspace_backend = body.workspace_backend or settings.workspace_backend
     subagent_policy = _resolve_subagent_policy(
@@ -309,6 +311,7 @@ async def create_run(
             "conversation_history_enabled": conversation_history_enabled,
             "run_mode": run_mode,
             "tool_loop_mode": tool_loop_mode,
+            "intent_router_mode": intent_router_mode,
             "approval_mode": approval_mode,
             "workspace_backend": workspace_backend,
             "eval_suite_id": body.eval_suite_id or settings.eval_suite_id,
@@ -403,6 +406,7 @@ def _agent_settings_from_run(
     metadata = dict(getattr(run, "metadata", {}) or {})
     run_mode = str(metadata.get("run_mode", "agent"))
     tool_loop_mode = str(metadata.get("tool_loop_mode", settings.tool_loop_mode))
+    intent_router_mode = str(metadata.get("intent_router_mode", settings.intent_router_mode))
     approval_mode = str(metadata.get("approval_mode", settings.approval_mode))
     workspace_backend = str(metadata.get("workspace_backend", settings.workspace_backend))
     return AgentSettings(
@@ -428,6 +432,13 @@ def _agent_settings_from_run(
         patch_max_tokens=settings.patch_max_tokens,
         run_mode=run_mode,
         tool_loop_mode=tool_loop_mode if tool_loop_mode in {"heuristic", "model"} else settings.tool_loop_mode,
+        intent_router_mode=(
+            intent_router_mode
+            if intent_router_mode in {"rules", "shadow_hybrid", "hybrid"}
+            else settings.intent_router_mode
+        ),
+        intent_router_max_epochs=settings.intent_router_max_epochs,
+        intent_router_model_timeout_seconds=settings.intent_router_model_timeout_seconds,
         approval_mode=approval_mode if approval_mode in {"confirm", "manual_only"} else settings.approval_mode,
         workspace_backend=workspace_backend if workspace_backend in {"local", "copy", "docker"} else settings.workspace_backend,
         eval_suite_id=str(metadata.get("eval_suite_id") or settings.eval_suite_id or "") or None,
@@ -547,7 +558,9 @@ async def approve_run_patch(
         patch_id,
         status=applied.status,
         apply_results=[dict(item) for item in applied.apply_results],
+        verification_plan=applied.verification_plan.model_dump(mode="json"),
         verification=applied.verification.model_dump(mode="json") if applied.verification else None,
+        stop_gate=applied.stop_gate.model_dump(mode="json"),
         error=applied.error,
     )
     if applied.apply_results and applied.status != "failed":
@@ -563,15 +576,19 @@ async def approve_run_patch(
             session_id,
             run_id,
             "verification_started",
-            "Running pytest and ruff verification.",
-            {"patch_id": patch_id},
+            "Running planned patch verification.",
+            {"patch_id": patch_id, "verification_plan": applied.verification_plan.model_dump(mode="json")},
         )
         await repo.append_event(
             session_id,
             run_id,
             "verification_completed",
             "Patch verification completed.",
-            {"patch_id": patch_id, "verification": applied.verification.model_dump(mode="json")},
+            {
+                "patch_id": patch_id,
+                "verification": applied.verification.model_dump(mode="json"),
+                "stop_gate": applied.stop_gate.model_dump(mode="json"),
+            },
         )
     await repo.mark_run_status(
         session_id,

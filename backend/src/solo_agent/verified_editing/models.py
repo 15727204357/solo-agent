@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 PatchStatus = Literal["pending", "approved", "rejected", "applied", "verification_failed", "failed"]
+StopGateStatus = Literal["passed", "failed", "missing", "waived"]
 
 
 class PatchEdit(BaseModel):
@@ -46,9 +47,24 @@ class PatchEdit(BaseModel):
         return self.preview_arguments()
 
 
+class VerificationCommand(BaseModel):
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    target: str | None = None
+    tool: str | None = None
+    purpose: str = ""
+
+
+class VerificationPlan(BaseModel):
+    commands: list[VerificationCommand] = Field(default_factory=list)
+    required: bool = True
+    reason: str = ""
+
+
 class PatchRequest(BaseModel):
     summary: str = ""
     edits: list[PatchEdit]
+    verification_plan: VerificationPlan | None = None
 
     @model_validator(mode="after")
     def require_edits(self) -> PatchRequest:
@@ -57,9 +73,23 @@ class PatchRequest(BaseModel):
         return self
 
 
+class StopGate(BaseModel):
+    status: StopGateStatus = "missing"
+    approval_ready: bool = False
+    reason: str = ""
+    missing_evidence: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_waiver_reason(self) -> StopGate:
+        if self.status == "waived" and not self.reason.strip():
+            raise ValueError("waived stop gate requires a reason")
+        return self
+
+
 class VerificationResult(BaseModel):
     pytest: dict[str, Any] | None = None
     ruff: dict[str, Any] | None = None
+    commands: list[dict[str, Any]] = Field(default_factory=list)
     ok: bool = False
 
 
@@ -71,6 +101,8 @@ class PatchProposal(BaseModel):
     summary: str = ""
     diff: str = ""
     edits: list[PatchEdit]
+    verification_plan: VerificationPlan = Field(default_factory=VerificationPlan)
+    stop_gate: StopGate = Field(default_factory=StopGate)
     apply_results: list[dict[str, Any]] = Field(default_factory=list)
     verification: VerificationResult | None = None
     error: str | None = None

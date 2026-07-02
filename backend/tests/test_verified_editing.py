@@ -35,7 +35,7 @@ class FakeToolCaller:
             if not self.apply_ok:
                 return {"ok": False, "error": "Hash mismatch"}
             return {"ok": True, "result": {"path": arguments["path"], "changed": True}}
-        if name == "run_pytest":
+        if name in {"run_pytest", "targeted_pytest"}:
             return {"ok": True, "result": {"returncode": self.pytest_code, "output": "pytest"}}
         if name == "run_ruff_check":
             return {"ok": True, "result": {"returncode": self.ruff_code, "output": "ruff"}}
@@ -69,7 +69,44 @@ async def test_build_patch_proposal_previews_diff_and_skips_noop() -> None:
     assert proposal.status == "pending"
     assert proposal.edits[0].expected_hash == "hash-1"
     assert "--- app.py" in proposal.diff
+    assert proposal.verification_plan.required is True
+    assert [command.tool for command in proposal.verification_plan.commands] == ["run_pytest", "run_ruff_check"]
+    assert proposal.stop_gate.status == "missing"
+    assert proposal.stop_gate.approval_ready is False
     assert [name for name, _ in caller.calls] == ["prepare_edit", "preview_patch"]
+
+
+@pytest.mark.asyncio
+async def test_build_patch_proposal_uses_impact_verification_commands() -> None:
+    request = extract_patch_request(
+        '{"summary":"Fix greeting","edits":[{"path":"app.py","old_text":"old","new_text":"new"}]}'
+    )
+
+    proposal = await build_patch_proposal(
+        request,
+        session_id="s1",
+        run_id="r1",
+        call_tool=FakeToolCaller(),
+        impact_analysis={"verify_commands": ["pytest -q tests/test_app.py", "ruff check app.py"]},
+    )
+
+    assert [command.tool for command in proposal.verification_plan.commands] == ["targeted_pytest", "run_ruff_check"]
+    assert proposal.verification_plan.commands[0].target == "tests/test_app.py"
+    assert proposal.verification_plan.commands[1].target == "app.py"
+
+
+@pytest.mark.asyncio
+async def test_build_patch_proposal_waives_documentation_only_verification() -> None:
+    request = extract_patch_request(
+        '{"summary":"Docs","edits":[{"path":"README.md","old_text":"old","new_text":"new"}]}'
+    )
+
+    proposal = await build_patch_proposal(request, session_id="s1", run_id="r1", call_tool=FakeToolCaller())
+
+    assert proposal.verification_plan.required is False
+    assert proposal.stop_gate.status == "waived"
+    assert proposal.stop_gate.reason
+    assert proposal.stop_gate.approval_ready is True
 
 
 @pytest.mark.asyncio
@@ -94,6 +131,7 @@ async def test_apply_approved_patch_stops_before_verification_on_apply_failure()
 
     assert applied.status == "failed"
     assert applied.verification is None
+    assert applied.stop_gate.status == "missing"
     assert [name for name, _ in caller.calls] == ["apply_text_edit"]
 
 
@@ -111,4 +149,20 @@ async def test_apply_approved_patch_runs_pytest_and_ruff() -> None:
     assert applied.verification is not None
     assert applied.verification.pytest["returncode"] == 0
     assert applied.verification.ruff["returncode"] == 1
+    assert applied.stop_gate.status == "failed"
+    assert applied.stop_gate.approval_ready is False
     assert [name for name, _ in caller.calls] == ["apply_text_edit", "run_pytest", "run_ruff_check"]
+
+
+@pytest.mark.asyncio
+async def test_apply_approved_patch_passes_stop_gate() -> None:
+    request = extract_patch_request(
+        '{"summary":"Fix","edits":[{"path":"app.py","old_text":"old","new_text":"new"}]}'
+    )
+    proposal = await build_patch_proposal(request, session_id="s1", run_id="r1", call_tool=FakeToolCaller())
+
+    applied = await apply_approved_patch(proposal, call_tool=FakeToolCaller(pytest_code=0, ruff_code=0))
+
+    assert applied.status == "applied"
+    assert applied.stop_gate.status == "passed"
+    assert applied.stop_gate.approval_ready is True

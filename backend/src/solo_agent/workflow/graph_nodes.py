@@ -17,6 +17,7 @@ from solo_agent.workflow.stages import (
     _environment_error_response_stage,
     _execute_tools_node,
     _inspect_node,
+    _intent_route_node,
     _load_builtin_memory_stage,
     _parallel_dispatch_stage,
     _parallelism_gate_stage,
@@ -163,6 +164,10 @@ def make_collect_context_node(deps: Any, settings: Any):
 
 def make_inspect_node(deps: Any):
     return _make_node(_inspect_node, deps)
+
+
+def make_intent_route_node(deps: Any, settings: Any):
+    return _make_node(_intent_route_node, deps, settings)
 
 
 def make_select_tools_node(deps: Any, settings: Any):

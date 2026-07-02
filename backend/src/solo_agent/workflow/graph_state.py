@@ -96,6 +96,8 @@ def _parse_common_fields(data: dict[str, Any]) -> dict[str, Any]:
         "evidence_timeline": list(data.get("evidence_timeline") or []),
         "git_artifact_proposal": dict(data.get("git_artifact_proposal") or {}),
         "eval_report": dict(data.get("eval_report") or {}),
+        "intent_route_plan": dict(data.get("intent_route_plan") or {}),
+        "route_epoch": int(data.get("route_epoch", 0)),
         "tool_calls": tool_calls,
         "patch_proposal": data.get("patch_proposal"),
         "skill_change_proposal": data.get("skill_change_proposal"),

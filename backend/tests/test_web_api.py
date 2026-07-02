@@ -96,6 +96,8 @@ def test_web_api_patch_approve_applies_and_verifies(monkeypatch) -> None:
     assert approved.status_code == 200
     assert approved.json()["ok"] is True
     assert approved.json()["verification"]["pytest"]["returncode"] == 0
+    assert approved.json()["stop_gate"]["status"] == "passed"
+    assert approved.json()["stop_gate"]["approval_ready"] is True
     assert [name for name, _ in registry.calls] == ["apply_text_edit", "run_pytest", "run_ruff_check"]
     assert asyncio.run(repo.get_run(session_id, run["id"])).status == "completed"
 
@@ -333,7 +335,7 @@ class FakeApprovalRegistry:
         self.calls.append((name, arguments))
         if name == "apply_text_edit":
             return {"ok": True, "result": {"changed": True, "path": arguments["path"]}}
-        if name == "run_pytest":
+        if name in {"run_pytest", "targeted_pytest"}:
             return {"ok": True, "result": {"returncode": 0, "output": "pytest ok"}}
         if name == "run_ruff_check":
             return {"ok": True, "result": {"returncode": 0, "output": "ruff ok"}}

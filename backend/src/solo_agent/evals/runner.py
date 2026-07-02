@@ -9,7 +9,7 @@ from typing import Any
 
 from .case import EvalCase, EvalResult
 from .report import eval_report_markdown
-from .scoring import score_eval_case
+from .scoring import score_eval_case, score_route_case
 
 EvalExecutor = Callable[[EvalCase, Path], dict[str, Any]]
 
@@ -62,7 +62,17 @@ def _run_case(case: EvalCase, case_root: Path, executor: EvalExecutor | None) ->
     tests_failed = int(output.get("tests_failed") or 0)
     outcome_status = str(output.get("outcome_status") or "unknown")
     unrelated = sorted(set(changed) - set(case.expected_changed_files)) if case.expected_changed_files else []
-    passed, score, notes = score_eval_case(case, changed, tests_failed=tests_failed, outcome_status=outcome_status)
+    route_plan = output.get("route_plan") if isinstance(output.get("route_plan"), dict) else {}
+    route_events = [event for event in output.get("route_events") or [] if isinstance(event, dict)]
+    route_passed, route_score, route_notes = score_route_case(case, route_plan, route_events)
+    passed, score, notes = score_eval_case(
+        case,
+        changed,
+        tests_failed=tests_failed,
+        outcome_status=outcome_status,
+        route_plan=route_plan,
+        route_events=route_events,
+    )
     return EvalResult(
         case_id=case.id,
         passed=passed,
@@ -80,6 +90,9 @@ def _run_case(case: EvalCase, case_root: Path, executor: EvalExecutor | None) ->
         tool_calls=int(output.get("tool_calls") or 0),
         human_interventions=int(output.get("human_interventions") or 0),
         failure_class=str(output.get("failure_class") or ""),
+        route_passed=route_passed,
+        route_score=route_score,
+        route_notes=route_notes,
         duration_seconds=round(time.perf_counter() - started, 3),
         notes=notes + [str(item) for item in output.get("notes", [])],
     )

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from solo_agent.agent.state import AgentState
 from solo_agent.tools.registry import create_default_registry
+from solo_agent.verified_editing import PatchProposalError
 from solo_agent.workflow.graph_state import initial_graph_state
 from solo_agent.workflow.graphs import build_main_workflow_graph
-from solo_agent.workflow.stages import _TEAM_DEVELOPER_TOOL_NAMES, _sandbox_git_diff_result, _team_sandbox_registry_and_ledger
+from solo_agent.workflow.stages import (
+    _TEAM_DEVELOPER_TOOL_NAMES,
+    _patch_request_from_team_sandbox_output,
+    _sandbox_git_diff_result,
+    _team_sandbox_registry_and_ledger,
+)
 
 
 class ChatChunk:
@@ -143,6 +151,164 @@ def test_team_developer_ledger_allows_only_sandbox_coding_tools(tmp_path) -> Non
     assert (workspace / "sample.txt").read_text(encoding="utf-8") == "old value\n"
     assert (sandbox / "sample.txt").read_text(encoding="utf-8") == "new value\n"
     assert [call["name"] for call in ledger.calls] == ["prepare_edit", "apply_text_edit", "create_file"]
+
+def test_team_sandbox_registry_creates_distinct_developer_workspaces(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    sandbox = tmp_path / "sandbox"
+    workspace.mkdir()
+    sandbox.mkdir()
+    (workspace / "sample.txt").write_text("old value\n", encoding="utf-8")
+    (sandbox / "sample.txt").write_text("old value\n", encoding="utf-8")
+    registry = create_default_registry(
+        workspace,
+        is_plan_mode=True,
+        subagent_enabled=True,
+        command_workspace_root=sandbox,
+        sandbox_mode="isolated",
+    )
+
+    _, first = _team_sandbox_registry_and_ledger(
+        registry,
+        {"sandbox_mode": "isolated"},
+        developer_id="developer-1",
+        iteration=1,
+    )
+    _, second = _team_sandbox_registry_and_ledger(
+        registry,
+        {"sandbox_mode": "isolated"},
+        developer_id="developer-2",
+        iteration=1,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.sandbox_root != second.sandbox_root
+    assert first.sandbox_root.parent == second.sandbox_root.parent
+    assert (first.sandbox_root / "sample.txt").read_text(encoding="utf-8") == "old value\n"
+    assert (second.sandbox_root / "sample.txt").read_text(encoding="utf-8") == "old value\n"
+    assert (sandbox / "sample.txt").read_text(encoding="utf-8") == "old value\n"
+
+
+
+def test_team_sandbox_registry_prefers_git_worktree_overlay(tmp_path) -> None:
+    if subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).returncode != 0:
+        pytest.skip("git is not available")
+
+    workspace = tmp_path / "repo"
+    sandbox = tmp_path / "sandbox"
+    workspace.mkdir()
+    sandbox.mkdir()
+    (workspace / "sample.txt").write_text("committed value\n", encoding="utf-8")
+    _run_test_git(workspace, ["init"])
+    _run_test_git(workspace, ["config", "user.email", "solo-agent@example.test"])
+    _run_test_git(workspace, ["config", "user.name", "Solo Agent"])
+    _run_test_git(workspace, ["add", "sample.txt"])
+    _run_test_git(workspace, ["commit", "-m", "initial"])
+    (sandbox / "sample.txt").write_text("dirty overlay value\n", encoding="utf-8")
+    (sandbox / "overlay.txt").write_text("overlay only\n", encoding="utf-8")
+    registry = create_default_registry(
+        workspace,
+        is_plan_mode=True,
+        subagent_enabled=True,
+        command_workspace_root=sandbox,
+        sandbox_mode="isolated",
+    )
+
+    _, ledger = _team_sandbox_registry_and_ledger(
+        registry,
+        {"sandbox_mode": "isolated"},
+        developer_id="developer-1",
+        iteration=1,
+    )
+
+    assert ledger is not None
+    assert ledger.workspace_backend == "git_worktree_overlay"
+    assert (ledger.sandbox_root / ".git").exists()
+    assert (ledger.sandbox_root / "sample.txt").read_text(encoding="utf-8") == "dirty overlay value\n"
+    assert (ledger.sandbox_root / "overlay.txt").read_text(encoding="utf-8") == "overlay only\n"
+
+
+def _run_test_git(root, args: list[str]) -> None:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+def test_team_supervisor_merges_non_overlapping_developer_workspace_diffs(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    command = tmp_path / "sandbox"
+    dev1 = tmp_path / "dev1"
+    dev2 = tmp_path / "dev2"
+    for root in (workspace, command, dev1, dev2):
+        root.mkdir()
+    (workspace / "a.txt").write_text("a old\n", encoding="utf-8")
+    (workspace / "b.txt").write_text("b old\n", encoding="utf-8")
+    (dev1 / "a.txt").write_text("a new\n", encoding="utf-8")
+    (dev2 / "b.txt").write_text("b new\n", encoding="utf-8")
+    registry = create_default_registry(
+        workspace,
+        is_plan_mode=True,
+        subagent_enabled=True,
+        command_workspace_root=command,
+        sandbox_mode="isolated",
+    )
+    deps = type("Deps", (), {"tool_registry": registry})()
+    state = AgentState(session_id="s-merge", run_id="r-merge", user_input="merge developer diffs")
+
+    request = _patch_request_from_team_sandbox_output(
+        state=state,
+        deps=deps,
+        output={
+            "summary": "merge independent developer changes",
+            "developer_workspaces": [
+                {"developer_id": "developer-1", "sandbox_root": str(dev1), "changed_files": ["a.txt"]},
+                {"developer_id": "developer-2", "sandbox_root": str(dev2), "changed_files": ["b.txt"]},
+            ],
+        },
+    )
+
+    assert request.summary == "merge independent developer changes"
+    assert {edit.path for edit in request.edits} == {"a.txt", "b.txt"}
+    assert {edit.new_text for edit in request.edits} == {"a new\n", "b new\n"}
+
+
+def test_team_supervisor_blocks_overlapping_developer_workspace_diffs(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    command = tmp_path / "sandbox"
+    dev1 = tmp_path / "dev1"
+    dev2 = tmp_path / "dev2"
+    for root in (workspace, command, dev1, dev2):
+        root.mkdir()
+    (workspace / "a.txt").write_text("a old\n", encoding="utf-8")
+    (dev1 / "a.txt").write_text("a new from one\n", encoding="utf-8")
+    (dev2 / "a.txt").write_text("a new from two\n", encoding="utf-8")
+    registry = create_default_registry(
+        workspace,
+        is_plan_mode=True,
+        subagent_enabled=True,
+        command_workspace_root=command,
+        sandbox_mode="isolated",
+    )
+    deps = type("Deps", (), {"tool_registry": registry})()
+    state = AgentState(session_id="s-conflict", run_id="r-conflict", user_input="merge developer diffs")
+
+    with pytest.raises(PatchProposalError, match="merge conflict"):
+        _patch_request_from_team_sandbox_output(
+            state=state,
+            deps=deps,
+            output={
+                "summary": "conflicting developer changes",
+                "developer_workspaces": [
+                    {"developer_id": "developer-1", "sandbox_root": str(dev1), "changed_files": ["a.txt"]},
+                    {"developer_id": "developer-2", "sandbox_root": str(dev2), "changed_files": ["a.txt"]},
+                ],
+            },
+        )
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,8 @@ class SessionRepository(ABC):
         status: str | None = None,
         apply_results: list[dict[str, object]] | None = None,
         verification: dict[str, object] | None = None,
+        verification_plan: dict[str, object] | None = None,
+        stop_gate: dict[str, object] | None = None,
         error: str | None = None,
         decided: bool = False,
     ) -> PatchProposal | None:
@@ -302,6 +304,8 @@ class InMemorySessionRepository(SessionRepository):
         status: str | None = None,
         apply_results: list[dict[str, object]] | None = None,
         verification: dict[str, object] | None = None,
+        verification_plan: dict[str, object] | None = None,
+        stop_gate: dict[str, object] | None = None,
         error: str | None = None,
         decided: bool = False,
     ) -> PatchProposal | None:
@@ -317,6 +321,8 @@ class InMemorySessionRepository(SessionRepository):
                         "status": status,
                         "apply_results": apply_results,
                         "verification": verification,
+                        "verification_plan": verification_plan,
+                        "stop_gate": stop_gate,
                         "error": error,
                     }.items()
                     if value is not None
@@ -764,6 +770,8 @@ class SQLiteSessionRepository(SessionRepository):
             edits=[edit.model_dump(mode="json") for edit in proposal.edits],
             diff=proposal.diff,
             status=proposal.status,
+            verification_plan=proposal.verification_plan.model_dump(mode="json"),
+            stop_gate=proposal.stop_gate.model_dump(mode="json"),
         )
         return _patch_from_memory(record)
 
@@ -788,6 +796,8 @@ class SQLiteSessionRepository(SessionRepository):
         status: str | None = None,
         apply_results: list[dict[str, object]] | None = None,
         verification: dict[str, object] | None = None,
+        verification_plan: dict[str, object] | None = None,
+        stop_gate: dict[str, object] | None = None,
         error: str | None = None,
         decided: bool = False,
     ) -> PatchProposal | None:
@@ -797,6 +807,8 @@ class SQLiteSessionRepository(SessionRepository):
             status=status,
             apply_results=apply_results,
             verification=verification,
+            verification_plan=verification_plan,
+            stop_gate=stop_gate,
             error=error,
             decided=decided,
         )
@@ -1085,6 +1097,8 @@ def _patch_from_memory(record: object) -> PatchProposal:
         summary=str(record.summary or ""),
         diff=str(record.diff or ""),
         edits=list(record.edits or []),
+        verification_plan=getattr(record, "verification_plan", None) or {},
+        stop_gate=getattr(record, "stop_gate", None) or {},
         apply_results=list(record.apply_results or []),
         verification=record.verification,
         error=record.error,

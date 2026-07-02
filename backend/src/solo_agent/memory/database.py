@@ -4,6 +4,7 @@ from pathlib import Path
 
 from sqlalchemy import event, make_url, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from .models import Base
 
@@ -31,7 +32,11 @@ def create_memory_engine(
 ) -> AsyncEngine:
     _ensure_sqlite_parent_directory(database_path)
 
-    engine = create_async_engine(sqlite_url(database_path), echo=echo, future=future)
+    url = sqlite_url(database_path)
+    kwargs = {"echo": echo, "future": future}
+    if make_url(url).drivername.startswith("sqlite"):
+        kwargs["poolclass"] = NullPool
+    engine = create_async_engine(url, **kwargs)
 
     @event.listens_for(engine.sync_engine, "connect")
     def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
@@ -49,6 +54,7 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker:
 async def init_database(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await _ensure_patch_proposal_gate_columns(connection)
         await connection.execute(text("DROP TRIGGER IF EXISTS messages_ai"))
         await connection.execute(text("DROP TRIGGER IF EXISTS messages_ad"))
         await connection.execute(text("DROP TRIGGER IF EXISTS messages_au"))
@@ -106,6 +112,15 @@ async def init_database(engine: AsyncEngine) -> None:
                 """
             )
         )
+
+
+async def _ensure_patch_proposal_gate_columns(connection) -> None:
+    result = await connection.execute(text("PRAGMA table_info(patch_proposals)"))
+    columns = {str(row[1]) for row in result.fetchall()}
+    if "verification_plan" not in columns:
+        await connection.execute(text("ALTER TABLE patch_proposals ADD COLUMN verification_plan JSON DEFAULT '{}'"))
+    if "stop_gate" not in columns:
+        await connection.execute(text("ALTER TABLE patch_proposals ADD COLUMN stop_gate JSON DEFAULT '{}'"))
 
 
 def _ensure_sqlite_parent_directory(database_path: str | Path | None) -> None:

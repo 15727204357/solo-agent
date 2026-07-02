@@ -43,47 +43,66 @@ class WorkflowRuntime:
             settings=settings,
         )
         checkpointer = await create_checkpointer(settings)
-        compiled = graph.compile(checkpointer=checkpointer if checkpointer else False)
+        try:
+            compiled = graph.compile(checkpointer=checkpointer if checkpointer else False)
 
-        thread_id = self._agent_state.run_id
-        config = {"configurable": {"thread_id": thread_id}}
+            thread_id = self._agent_state.run_id
+            config = {"configurable": {"thread_id": thread_id}}
 
-        seen_event_keys: set[tuple[str, str, str]] = set()
+            seen_event_keys: set[tuple[str, str, str]] = set()
 
-        async for update in compiled.astream(gs, config=config, stream_mode="values"):
-            if not isinstance(update, dict):
-                continue
+            async for update in compiled.astream(gs, config=config, stream_mode="values"):
+                if not isinstance(update, dict):
+                    continue
 
-            for event_dict in update.get("events", []):
-                if isinstance(event_dict, dict):
-                    key = (
-                        event_dict.get("type", ""),
-                        event_dict.get("session_id", ""),
-                        event_dict.get("created_at", ""),
-                    )
-                    if key not in seen_event_keys:
-                        seen_event_keys.add(key)
-                        yield AgentEvent(
-                            type=event_dict.get("type", ""),
-                            session_id=event_dict.get("session_id", ""),
-                            run_id=event_dict.get("run_id", ""),
-                            node=event_dict.get("node", "workflow"),
-                            message=event_dict.get("message", ""),
-                            data=event_dict.get("data", {}),
-                            agent_source=event_dict.get("agent_source", default_agent_source),
+                for event_dict in update.get("events", []):
+                    if isinstance(event_dict, dict):
+                        key = (
+                            event_dict.get("type", ""),
+                            event_dict.get("session_id", ""),
+                            event_dict.get("created_at", ""),
                         )
+                        if key not in seen_event_keys:
+                            seen_event_keys.add(key)
+                            yield AgentEvent(
+                                type=event_dict.get("type", ""),
+                                session_id=event_dict.get("session_id", ""),
+                                run_id=event_dict.get("run_id", ""),
+                                node=event_dict.get("node", "workflow"),
+                                message=event_dict.get("message", ""),
+                                data=event_dict.get("data", {}),
+                                agent_source=event_dict.get("agent_source", default_agent_source),
+                            )
 
-            if "agent_state" in update:
-                self._agent_state = agent_state_from_graph_data(update["agent_state"])
+                if "agent_state" in update:
+                    self._agent_state = agent_state_from_graph_data(update["agent_state"])
 
-        if self._agent_state.awaiting_approval:
-            return
+            if self._agent_state.awaiting_approval:
+                return
 
-        yield AgentEvent(
-            type="run_completed",
-            session_id=self._agent_state.session_id,
-            run_id=self._agent_state.run_id,
-            node="workflow",
-            message="Workflow run completed",
-            data={"blocked": self._agent_state.blocked, "block_reason": self._agent_state.block_reason},
-        )
+            yield AgentEvent(
+                type="run_completed",
+                session_id=self._agent_state.session_id,
+                run_id=self._agent_state.run_id,
+                node="workflow",
+                message="Workflow run completed",
+                data={"blocked": self._agent_state.blocked, "block_reason": self._agent_state.block_reason},
+            )
+        finally:
+            await _close_checkpointer(checkpointer)
+
+
+async def _close_checkpointer(checkpointer: Any) -> None:
+    if not checkpointer:
+        return
+    close = getattr(checkpointer, "close", None) or getattr(checkpointer, "aclose", None)
+    if close is not None:
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
+        return
+    conn = getattr(checkpointer, "conn", None)
+    if conn is not None and hasattr(conn, "close"):
+        result = conn.close()
+        if hasattr(result, "__await__"):
+            await result

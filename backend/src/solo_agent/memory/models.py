@@ -196,6 +196,8 @@ class PatchProposalRecord(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     edits: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     diff: Mapped[str] = mapped_column(Text, default="")
+    verification_plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    stop_gate: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     apply_results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     verification: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

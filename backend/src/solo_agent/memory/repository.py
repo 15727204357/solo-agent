@@ -146,11 +146,26 @@ class SQLiteMemoryRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         memory_root: str | Path | None = None,
+        engine: AsyncEngine | None = None,
     ) -> None:
         self._session_factory = session_factory
+        self._engine = engine
         self.memory_root = Path(memory_root or Path.cwd()).resolve()
         self._prefetch_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._governance = MemoryGovernanceService(session_factory, memory_root=self.memory_root)
+
+    async def close(self) -> None:
+        if self._engine is not None:
+            await self._engine.dispose()
+
+    async def aclose(self) -> None:
+        await self.close()
+
+    async def __aenter__(self) -> SQLiteMemoryRepository:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.close()
 
     @classmethod
     def from_engine(
@@ -159,7 +174,7 @@ class SQLiteMemoryRepository:
         *,
         memory_root: str | Path | None = None,
     ) -> SQLiteMemoryRepository:
-        return cls(create_session_factory(engine), memory_root=memory_root)
+        return cls(create_session_factory(engine), memory_root=memory_root, engine=engine)
 
     @classmethod
     def from_url(
@@ -743,6 +758,8 @@ class SQLiteMemoryRepository:
         edits: list[dict[str, Any]] | None = None,
         diff: str = "",
         status: str = "pending",
+        verification_plan: dict[str, Any] | None = None,
+        stop_gate: dict[str, Any] | None = None,
         proposal: Any | None = None,
     ) -> PatchProposalRecord:
         if proposal is not None:
@@ -753,6 +770,8 @@ class SQLiteMemoryRepository:
             edits = [edit.model_dump(mode="json") for edit in proposal.edits]
             diff = proposal.diff
             status = proposal.status
+            verification_plan = proposal.verification_plan.model_dump(mode="json")
+            stop_gate = proposal.stop_gate.model_dump(mode="json")
         if session_id is None or run_id is None or patch_id is None:
             raise ValueError("session_id, run_id, and patch_id are required")
         now = utc_now()
@@ -764,6 +783,8 @@ class SQLiteMemoryRepository:
             summary=summary,
             edits=edits or [],
             diff=diff,
+            verification_plan=verification_plan or {},
+            stop_gate=stop_gate or {},
             apply_results=[],
             verification=None,
             created_at=now,
@@ -796,6 +817,8 @@ class SQLiteMemoryRepository:
         status: str | None = None,
         apply_results: list[dict[str, Any]] | None = None,
         verification: dict[str, Any] | None = None,
+        verification_plan: dict[str, Any] | None = None,
+        stop_gate: dict[str, Any] | None = None,
         error: str | None = None,
         decided: bool = False,
     ) -> PatchProposalRecord | None:
@@ -810,6 +833,10 @@ class SQLiteMemoryRepository:
                 record.apply_results = apply_results
             if verification is not None:
                 record.verification = verification
+            if verification_plan is not None:
+                record.verification_plan = verification_plan
+            if stop_gate is not None:
+                record.stop_gate = stop_gate
             record.error = error
             record.updated_at = now
             if decided:

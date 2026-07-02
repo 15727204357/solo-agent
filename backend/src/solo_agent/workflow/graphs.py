@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
 
@@ -14,6 +14,7 @@ from solo_agent.workflow.graph_nodes import (
     make_environment_error_response_node,
     make_execute_tools_node,
     make_inspect_node,
+    make_intent_route_node,
     make_load_builtin_memory_node,
     make_parallel_dispatch_node,
     make_parallelism_gate_node,
@@ -42,6 +43,7 @@ from solo_agent.workflow.graph_nodes import (
     make_wait_subagents_node,
 )
 from solo_agent.workflow.graph_state import SoloGraphState
+from solo_agent.workflow.intent_router import reroute_triggers_from_state
 
 # ---------------------------------------------------------------------------
 # Route helpers
@@ -119,13 +121,14 @@ def build_main_workflow_graph(
     """Build the complete LangGraph StateGraph for the Solo Agent workflow.
 
     This is the sole orchestration graph covering all execution modes in a
-    single unified topology. Subagents are owned by graph-level fan-out nodes
-    after the deterministic ``parallelism_gate`` proves task independence.
+    single unified topology. In team mode, ``parallelism_gate`` is the
+    developer orchestration gate between planning and development; it does
+    not dispatch subagents directly.
       - plan capability mode: same execution graph, stronger planning prompt
       - agent workflow: plan -> context -> inspect -> tools -> review -> respond
-      - team workflow: plan -> team_plan -> team_develop -> team_test -> team_supervisor
-      - verified editing (propose 鈫?await approval 鈫?apply 鈫?verify 鈫?review)
-      - error recovery (classify 鈫?recover/block)
+      - team workflow: plan -> team_plan -> parallelism_gate -> team_develop -> team_test -> team_supervisor
+      - verified editing (propose -> await approval -> apply -> verify -> review)
+      - error recovery (classify -> recover/block)
       - memory prelude/postlude
       - checkpoint persistence
     """
@@ -162,6 +165,7 @@ def build_main_workflow_graph(
     graph.add_node("team_supervisor", make_team_supervisor_node(deps, settings))
     graph.add_node("collect_context", make_collect_context_node(deps, settings))
     graph.add_node("inspect", make_inspect_node(deps))
+    graph.add_node("intent_route", make_intent_route_node(deps, settings))
     graph.add_node("select_tools", make_select_tools_node(deps, settings))
     graph.add_node("execute_tools", make_execute_tools_node(deps, settings))
 
@@ -238,22 +242,17 @@ def build_main_workflow_graph(
         {"team_plan": "team_plan", "collect_context": "collect_context"},
     )
 
-    # Legacy diagnostic fan-out nodes are still registered, but the main graph
-    # now uses the stable team workflow instead of parallelism_gate routing.
-    graph.add_edge("parallel_dispatch", "wait_subagents")
-    graph.add_edge("wait_subagents", "supervisor_review")
-    graph.add_conditional_edges(
-        "supervisor_review",
-        route_after_supervisor_review,
-        {
-            "spec_compliance_review": "spec_compliance_review",
-            "collect_context": "collect_context",
-            "classify_error": "classify_error",
-        },
-    )
+    # Legacy diagnostic fan-out nodes stay registered for compatibility, but
+    # they are intentionally not wired into the main graph. Developer
+    # parallelism is decided by parallelism_gate inside the team workflow.
 
-    # Lightweight team workflow: planner -> developer pool -> tester -> supervisor.
-    graph.add_edge("team_plan", "team_develop")
+    # Lightweight team workflow: planner -> developer parallelism gate -> developer pool -> tester -> supervisor.
+    graph.add_edge("team_plan", "parallelism_gate")
+    graph.add_conditional_edges(
+        "parallelism_gate",
+        route_after_parallelism_gate,
+        {END: END, "team_develop": "team_develop"},
+    )
     graph.add_edge("team_develop", "team_test")
     graph.add_conditional_edges(
         "team_test",
@@ -270,14 +269,20 @@ def build_main_workflow_graph(
     graph.add_edge("collect_context", "inspect")
     graph.add_conditional_edges(
         "inspect",
-        lambda s: END if _is_blocked(s) else "select_tools",
-        {END: END, "select_tools": "select_tools"},
+        lambda s: END if _is_blocked(s) else "intent_route",
+        {END: END, "intent_route": "intent_route"},
     )
+    graph.add_edge("intent_route", "select_tools")
     graph.add_edge("select_tools", "execute_tools")
     graph.add_conditional_edges(
         "execute_tools",
-        lambda s: "classify_error" if _has_error(s) else (END if _is_awaiting_approval(s) else "spec_compliance_review"),
-        {END: END, "spec_compliance_review": "spec_compliance_review", "classify_error": "classify_error"},
+        lambda s: "classify_error" if _has_error(s) else route_after_execute_tools(s),
+        {
+            END: END,
+            "intent_route": "intent_route",
+            "spec_compliance_review": "spec_compliance_review",
+            "classify_error": "classify_error",
+        },
     )
     # Always route through propose_verified_patch after spec compliance review
     # (the node itself skips if patch already generated)
@@ -374,7 +379,19 @@ def make_route_after_guard(target: str):
 def route_after_execute_tools(state: SoloGraphState) -> str:
     if _is_awaiting_approval(state):
         return END
+    if _should_reroute_after_tools(state):
+        return "intent_route"
     return "spec_compliance_review"
+
+
+def _should_reroute_after_tools(state: SoloGraphState) -> bool:
+    agent_data = state.get("agent_state") or {}
+    snapshots = agent_data.get("snapshots") or {}
+    if isinstance(snapshots, dict) and snapshots.get("pending_reroute"):
+        return True
+    router_settings = snapshots.get("intent_router") if isinstance(snapshots, dict) else {}
+    settings = router_settings if isinstance(router_settings, dict) else {}
+    return bool(reroute_triggers_from_state(agent_data, settings))
 
 
 def route_after_task_state(state: SoloGraphState) -> str:
@@ -386,9 +403,7 @@ def route_after_task_state(state: SoloGraphState) -> str:
 def route_after_parallelism_gate(state: SoloGraphState) -> str:
     if _is_blocked(state):
         return END
-    if (state.get("agent_state") or {}).get("execution_strategy") == "parallel":
-        return "parallel_dispatch"
-    return "collect_context"
+    return "team_develop"
 
 
 def route_after_team_test(state: SoloGraphState) -> str:
