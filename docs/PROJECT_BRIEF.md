@@ -1,92 +1,101 @@
-# Solo Agent 项目说明
+﻿# Solo Agent 项目说明
 
-Solo Agent 是一个面向简历展示的 Python Agent 工程项目。当前场景已经升级为“场景 B：团队工程自动化工作流”：团队可以把多个工程任务提交给同一个本地优先的 Agent Runtime，由工作流引擎负责可重复执行、可审计记录和可控并行处理。
+Solo Agent 是一个本地优先的 Coding Agent Harness，用来处理真实仓库里的代码任务。项目重点不是模型本身，而是 harness：如何让 Agent 规划上下文、选择工具、管理记忆、使用 Skill、编排子 Agent、验证结果，并留下可审计的运行痕迹。
 
-当前目标不再是“个人开发者日常编程助手”，也不再停留在“只读 Web MVP”。Solo Agent 要落地成真实可执行的团队工程自动化 Runtime：能运行、能演示、能讲清楚架构，并把任务计划、并行门控、代码编辑、双轮审查、行为策略、记忆、MCP 工具协议、错误恢复和 checkpoint replay 都收敛到可逐步强化的运行时边界。
+V1 不追求在模型能力上超过云端 Coding Agent。它的价值在于：控制链路显式、本地可运行、过程可观察、结果可测试。
 
-## 使用场景
+## 产品定位
 
-团队工程自动化工作流要解决的是这些问题：
+Solo Agent 把 Coding Agent 看作一个执行系统，而不是一次聊天补全。
 
-- 同一类工程任务需要反复执行，但每次都靠人工拼提示词，难以复用。
-- 多个任务可以同时推进，但如果依赖、写入范围和验证路径判断不清，容易互相踩踏。
-- AI 回复缺少项目上下文和任务边界，容易把流程决策交给模型临场发挥。
-- 工具调用、审查结论和错误恢复过程不可见，难以审计和复盘。
-- 代码质量、安全边界和失败处理不稳定，重复失败无法及时升级为架构问题。
-- 会话和运行状态没有沉淀，下一次无法复用历史、恢复任务或解释决策来源。
+一次 run 应该能回答这些问题：
 
-Solo Agent 的团队工作流闭环是：
+- 用户到底想做什么？
+- 需要哪些上下文，为什么需要？
+- 哪些工具是候选，哪些被选择，哪些被拒绝或阻断？
+- 哪些 Skill 或 Recipe 相关？
+- 哪些步骤能自动执行，哪些必须审批？
+- 什么证据证明结果可靠？
+- 哪些经验值得沉淀成记忆、评测样本或 Skill 变更提案？
 
-1. 用户打开本地 Web UI。
-2. 用户提交一个任务或一批已知类型的工程任务。
-3. 计划层按 superpowers `writing-plans` 风格生成无占位符、2-5 分钟粒度、内联自审的计划。
-4. 工作流先判断任务是否满足 4 条独立性条件；全部满足才并行，否则串行。
-5. Agent 为每个任务收集有限且可解释的项目上下文。
-6. Agent 通过工具注册表调用上下文、质量检查和受控编辑工具。
-7. Graph 层行为策略在执行前强制 Superpowers Iron Law、Karpathy 行为约束、read-before-edit 和 hash-anchored preview 协议。
-8. 审查层执行双轮审查：第一轮规范合规，第二轮代码质量。
-9. 错误处理层使用本地 Hermes 风格 ErrorClassifier 做 4 分类，按单次 run 累计相同异常历史，并用本地 goose 风格 RepetitionInspector 捕捉重复工具调用，防止死循环。
-10. 前端通过 SSE 看到规划、并行/串行决策、工具调用、审查、错误处理和持久化过程。
-11. SQLite 保存会话、任务、运行、消息、工具调用、时间点、快照和审计线索。
+## 设计策略
 
-核心设计取向是：已知任务类型用代码定义，任务编排和安全边界由工作流引擎控制，LLM 主要负责上下文理解、计划生成、编辑建议和审查解释。
+### 意图路由作为控制中枢
 
-## 最佳实践地图
+意图路由是第一层决策入口。它把用户请求转成 route plan，里面包含 intent、备选意图、context plan、tool plan、skill plan、recipe plan、approval plan、verification plan、decision trace、reroute triggers、risk summary 和 next actions。
 
-这个项目会逐步吸收你指定的最佳实践：
+这样可以避免每个阶段都用自己的启发式重新猜任务类型。
 
-- 工作流引擎：Python 优先 deer-flow/LangGraph 风格；如果走 Go 生态，参考 eino 的类型安全工作流。已知任务类型用代码定义，比让 LLM 决定控制流更可靠。
-- 并行前提：superpowers 的 4 条独立性条件全部满足才并行，否则串行。
-- 计划层：superpowers `writing-plans`，要求无占位符、2-5 分钟粒度、内联自审。
-- 审查机制：双轮审查，第一轮规范合规，第二轮代码质量。
-- 错误处理：本地 Hermes 风格 ErrorClassifier 4 分类 +goose fix_conversation + max_compaction_attempts=2；单次 run 内三次相同异常失败等于架构问题。
-- 行为层：graph policy engine 强制 superpowers Iron Laws + Karpathy 规则；SKILL.md 只提供 SOP 内容和触发元数据。
-- 上下文层：goose 80% + tool_call_cut_off + SubdirectoryHintTracker。
-- 记忆层：hermes FTS5 + prefetch_all/sync_all/queue_prefetch_all + on_pre_compress hook。
-- 工具层：goose MCP + hermes SKILL.md。
-- 安全层：SecurityInspector + EgressInspector +  本地 goose 风格 RepetitionInspector。
-- 代码编辑：oh-my-openagent hash 锚定 + goose Tree-sitter。
-- 持久化：checkpoint 记录从哪里恢复执行。
-- 可观测：callback TimingPoint + 工具进度显示 + snapshot。
-- Provider：fast/complete 双路径 + fallback + declarative provider。
+### ReAct + Reflection 混合循环
 
-## 当前落地范围
+执行层是 ReAct 风格：观察仓库上下文，通过工具行动，再读取工具结果。反馈层是 Reflection 风格：tester 反馈、supervisor 审查、outcome judge、patch gate、memory candidate、route replay 和 eval 都会对执行结果做复盘。
 
-当前版本要做到“真实、可演示、可继续扩展”：
+系统不是一直调用工具，而是能判断证据不足、补丁被阻塞、测试失败，或者某个经验应该沉淀为记忆或 Skill 提案。
 
-- Web UI 优先，不做 CLI。
-- 支持真实 OpenAI、DeepSeek、Ollama 配置。
-- 实现 LangGraph 1.x 风格 Workflow Loop，并统一使用 TypedDict StateGraph 主编排。
-- 将工作流入口从单次个人任务升级为团队工程任务运行，预留任务类型注册、任务批次和并行调度边界。
-- 已知任务类型尽量代码化定义，LLM 不直接决定是否并行、是否越权写入或是否跳过审查。
-- 并行执行必须先通过独立性门控；不满足条件时默认串行。
-- 双轮审查作为 graph 节点：先检查规范合规，再检查代码质量。
-- 错误处理将失败归类为可恢复错误、策略违规、环境问题和重复架构失败；相同异常历史按单次 run 追踪，重复工具调用交给 RepetitionInspector。
-- SQLite 保存 session、run、message、tool_call、timing_point、snapshot，并用 FTS5 做内部全文索引。
-- Hermes 风格记忆周期：调用前召回，回复后同步，后台预热，压缩前保存洞察。
-- 工具注册表提供上下文读取、质量检查、hash 锚定编辑预览和受控写入。
-- 行为策略层在 graph 中硬执行：生产代码没有失败测试信号就阻断；编辑前必须读代码；`apply_text_edit` 必须具备 hash proof 和 preview。
-- 行为违规后优先自动恢复：缺上下文则补 `read_file`/`search_text`，缺 hash/preview 则补 `prepare_edit`/`preview_patch`，不可恢复时才阻断。
-- 安全检查器使用确定性规则，先不依赖模型判断。
-- 使用 Server-Sent Events 展示 Agent 运行过程。
+### 上下文是一种需要规划的资源
 
-不再把“只读”作为阶段边界。写入能力必须通过行为策略和工具协议受控落地；Tree-sitter 锚定、MCP 兼容、FTS5 检索、压缩 hook、checkpoint replay 和 provider fallback 继续作为后续增强项。
+上下文不是越多越好，而是要围绕证据收集。route plan 可以请求路径读取、文本搜索、代码地图、符号搜索、引用、影响分析、测试相关性、Git 范围和记忆范围。每个范围都服务于一个预期证据。
+
+运行内 summary 和 snapshot 可以减少重复扫描。只读上下文工具可以并发，写入动作仍然受控。
+
+### 面向 Coding 的记忆系统
+
+记忆系统围绕精确召回设计。SQLite FTS5/BM25 比纯向量检索更适合路径、符号、报错、配置名和历史修复方案。系统会保存最近消息、压缩摘要、内置 `MEMORY.md` / `USER.md`、路由决策、审查报告、子 Agent 运行记录和候选记忆。
+
+长期记忆不是自动写入。候选记忆必须经过治理才能成为正式记忆。
+
+### Skill 与自我改进基础
+
+Skill 采用渐进披露：先看紧凑元数据，真正命中后才加载完整 Skill，Recipe 和支持文件只在需要时加载。Skill evolution 是受控的自我改进链路。成功经验或阻塞模式可以生成 pending Skill/Recipe 提案，但不会绕过审批直接修改自己的能力。
+
+这种设计让系统有积累可复用工作流的路径，同时避免静默污染长期行为。
+
+### 团队模式
+
+团队模式不是任意 Agent swarm，而是小型工程团队结构。`parallelism_gate` 判断计划应该由一个 developer 做，还是拆成多个 developer assignment。developer 在隔离轻量工作区里执行，tester 验证，supervisor 把不冲突的 diff 合并成 verified patch proposal。
+
+关键边界是：developer 子 Agent 可以执行，但不能直接写主工作区。
+
+## 当前 V1 范围
+
+当前已经落地的能力包括：
+
+- LangGraph `StateGraph` 运行时；
+- Web UI 和 SSE 事件流；
+- OpenAI-compatible、DeepSeek、Ollama 和 fake provider；
+- 统一意图路由事件和前端 Route 状态；
+- Context Plan、context guard 和上下文压缩；
+- SQLite 持久化和 FTS5 记忆检索；
+- Python 代码智能：AST 索引、code map、引用搜索、影响分析、测试相关性、FTS5/BM25 搜索；
+- 有边界的工具注册表；
+- verified editing 和补丁审批边界；
+- Skill/Recipe 路由、策略、覆盖检查和 evolution 提案；
+- team developer 工作区，支持 Git worktree/overlay 和 copy fallback；
+- route replay 和 route-aware eval scoring；
+- 后端和前端回归测试。
+
+## V1 不做什么
+
+- 不做 Docker 或虚拟机级别沙箱。
+- 不开放任意子 Agent 拓扑。
+- 不允许模型输出直接修改主工作区。
+- 不允许 Skill 自动修改自己而不经过审批。
+- 不依赖外部向量数据库。
+- 不宣称已经实现完全自主自进化。
 
 ## 简历叙事
 
-可以这样描述这个项目：
+可以这样概括：
 
-“基于 Python 构建了一个本地优先的团队工程自动化 Agent Runtime，支持 FastAPI Web UI、SSE 流式可观测、OpenAI/DeepSeek/Ollama Provider 抽象、LangGraph 1.x 工作流拓扑、SQLite 会话记忆、受控工具注册表、安全检查器和 graph 层行为策略。系统按 plan/independence gate/context/inspect/tool/review/respond/persist 拆分执行阶段，将已知任务类型代码化，并把 Superpowers Iron Law、Karpathy 行为规则、并行门控、双轮审查、read-before-edit、hash preview、错误分类和自动恢复纳入运行时约束。”
+> 构建了一个本地优先的 Coding Agent Harness，围绕意图路由、上下文规划、FTS5 记忆、Skill/Recipe 渐进披露、团队子 Agent、verified editing、route replay 和 evals 形成闭环。系统结合 ReAct 式执行循环和 Reflection 式反馈机制，通过 tester feedback、supervisor review、patch gate、memory candidate 和 route eval 让 Agent 决策可解释、可回放、可持续改进。
 
 ## 工程原则
 
-- 展示 Agent 的过程，而不是只展示最终答案。
-- 已知任务类型优先代码化，避免把核心控制流交给模型临场决定。
-- 可重复执行、可审计和可恢复优先于一次性聪明回复。
-- 只有独立性条件全部满足时才并行，否则串行。
-- 审查是工作流节点，不是 prompt 里的善意提醒。
-- 在模型判断前，优先使用确定性安全规则。
-- 工具要窄、可描述、可审计，并限制在 workspace 内。
-- 持久化足够多的状态，方便调试每一次运行。
-- 先做小而稳定的兼容接口，再接入重型能力。
-- 行为约束必须在 graph/策略层硬执行，不能只依赖 prompt 或 skill 文本提醒。
+- 路由决策必须显式、可回放。
+- 上下文要有范围、原因、预算和 fallback。
+- 记忆必须治理，不能静默污染。
+- Skill 要渐进加载，避免无关内容干扰任务。
+- 子 Agent 只能在有边界的工作区里执行。
+- 文件修改必须变成补丁提案，再经过审批。
+- 模型建议不能绕过确定性 guardrail。
+- 失败案例要沉淀为 eval、route decision 或 Skill 提案。

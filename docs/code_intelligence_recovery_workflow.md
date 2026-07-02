@@ -1,48 +1,37 @@
-# Code Intelligence and Recovery Workflow
+﻿# 代码智能与恢复工作流
 
-Solo Agent now has a product-oriented Python code-intelligence layer and a more
-product-like long-task recovery path. Code Intelligence v2 is intentionally not
-a real LSP process, external vector database, or Docker sandbox dependency. It
-is a local LSP-like Python index with persistent SQLite storage, incremental
-refresh, call/reference graphs, test relevance, and explainable local retrieval.
+Solo Agent 内置了本地 Python 代码智能层。它不是完整 LSP server，也不是外部向量数据库或 Docker 沙箱。它是一个有工作区边界的本地索引，用来帮助 harness 收集可解释的仓库证据。
 
-## Code Intelligence V2
+## 代码智能工具
 
-The code-intelligence tools are read-only and workspace bounded:
+代码智能工具都是只读且受 workspace 边界限制的：
 
-- `code_index_status(path=".", refresh=false)` checks or refreshes the
-  persistent Python index stored under `.solo-agent/codeintel/index.sqlite3`.
-- `code_map(path=".", max_files=500)` returns indexed modules, classes,
-  functions, methods, constants, import edges, call edges, test files,
-  entrypoints, parse errors, and index metadata.
-- `find_references(symbol, path=".", max_matches=100)` returns indexed
-  definitions, imports, and references.
-- `analyze_impact(paths=[], symbols=[], include_tests=true)` estimates affected
-  files through imports, references, call graph signals, and test relevance.
-- `semantic_code_search(query, path=".", max_matches=20)` uses local
-  SQLite FTS5/BM25 plus path/symbol/token scoring and returns ranking reasons.
-- `symbol_search`, `symbol_definition`, `call_graph`, and `test_relevance`
-  expose the same index through more focused LSP-like queries.
+- `code_index_status(path=".", refresh=false)`：检查或刷新 `.solo-agent/codeintel/index.sqlite3` 下的 Python 索引。
+- `code_map(path=".", max_files=500)`：返回模块、类、函数、方法、常量、import、调用边、测试、入口点、解析错误和索引元数据。
+- `find_references(symbol, path=".", max_matches=100)`：返回符号定义、import 和引用。
+- `analyze_impact(paths=[], symbols=[], include_tests=true)`：根据 import、引用、调用关系和测试相关性估算影响范围。
+- `semantic_code_search(query, path=".", max_matches=20)`：使用本地 SQLite FTS5/BM25 加路径、符号和 token 分数做检索。
+- `symbol_search`、`symbol_definition`、`call_graph`、`test_relevance`：提供更聚焦的 LSP-like 查询。
 
-For Python projects, the index includes AST symbols, imports, calls, references,
-pytest tests, fixtures, markers, docstrings, signatures, and syntax errors.
-Cross-language indexing, real LSP server integration, and embedding-backed
-semantic retrieval are reserved for a later v3.
+对 Python 项目，索引会包含 AST 符号、import、调用、引用、pytest 测试、fixture、marker、docstring、signature 和语法错误。
 
-## Workflow Integration
+## 工作流集成
 
-Code tasks trigger `code_index_status`, `code_map`, and `analyze_impact` during
-context collection. The compact results are stored in graph state as
-`code_map_summary` and `impact_analysis` so later stages do not need to rescan
-unless the run starts fresh.
+代码智能是路由和验证阶段的证据来源：
 
-Team mode passes the impact summary to the developer prompt. The tester uses
-impact verification commands when the team plan does not already specify a
-targeted command. These commands now come from test relevance scoring where
-possible, so the agent can explain what it believes will be affected, which
-tests it should run, and why.
+- 意图路由可以请求 code map、impact analysis、symbol、reference 或 test relevance 范围。
+- `collect_context` 会 materialize 这些范围，并把 compact summary 存入 graph state。
+- `select_tools` 应复用 route plan 和已有 snapshots，避免重复做任务分类。
+- team mode 会把 code map 和 impact summary 传给 developer / tester。
+- 如果 team plan 没有显式验证命令，tester 可以使用 impact analysis 和 test relevance 给出的建议。
 
-The workflow emits:
+## 恢复与重路由
+
+无结果搜索和验证失败不只是最终回答里的解释，它们可以变成 reroute trigger。比如搜索无结果时扩大搜索范围，测试失败时切换到 debug-oriented context，影响分析不足时请求不同的代码智能范围。
+
+## 事件
+
+工作流可能发出：
 
 - `code_index_started`
 - `code_index_completed`
@@ -51,37 +40,20 @@ The workflow emits:
 - `impact_analysis_completed`
 - `test_relevance_completed`
 
-## Interrupt And Resume
+## 证据产物
 
-The web run-control model now distinguishes:
+团队和恢复路径可以保留：
 
-- `paused`: user interrupted without structured feedback.
-- `awaiting_feedback`: user interrupted and supplied feedback to apply on
-  resume.
-- `awaiting_approval`: verified patch or skill change is waiting for approval.
-- `cancelled`: user rejected or stopped the run.
+- code map summary；
+- impact analysis summary；
+- suggested verification commands；
+- sandbox diff；
+- developer tool ledger；
+- pytest/ruff 输出；
+- supervisor report。
 
-`POST /api/sessions/{session_id}/runs/{run_id}/interrupt` records a
-`run_interrupted` event and moves the run to `paused` or `awaiting_feedback`.
+这些证据会服务于补丁审批、route replay 和失败分析。
 
-`POST /api/sessions/{session_id}/runs/{run_id}/resume` can load a checkpoint
-state and continue from `team_develop`, `team_test`, or `team_supervisor` with
-`checkpoint_id`, `from_node`, `human_feedback`, and `recovery_hints`.
+## 边界
 
-## Sandbox Artifacts
-
-Each isolated team run can retain:
-
-- sandbox root
-- sandbox diff
-- developer tool ledger
-- pytest/ruff output
-- developer summary
-- code map summary
-- impact analysis
-
-`GET /api/sessions/{session_id}/runs/{run_id}/artifacts` returns the latest
-artifact view from checkpoint state. If the sandbox root still exists, resume
-uses it as the command workspace. If it is missing, the runtime can fall back to
-checkpoint state and known patch evidence instead of pretending the sandbox is
-still live.
+代码智能不负责改文件。它只提供排序后的证据。编辑仍然必须经过工具注册表、verified editing、sandbox/team 边界和审批 gate。

@@ -1,35 +1,60 @@
-# 上下文管理系统
+﻿# 上下文管理
 
-本模块把上下文预算、压缩触发、任务状态保活和目录提示注入收敛到 `solo_agent.context` 包中，供 Agent graph 在工具调用边界调用。
+Solo Agent 把上下文当成一种需要规划的资源。Agent 不应该一上来就把大量文件塞进 prompt，而应该先判断任务需要什么证据，再决定读取、搜索或分析哪些内容。
 
-## 产品口径
+## 两层上下文能力
 
-- Web 端 Agent 产品升级为团队工程自动化工作流，对标 DeerFlow/LangGraph 风格的可恢复运行模型。
-- 线程、运行和恢复能力交给 LangGraph 托管，任务批次和并行调度在工作流层显式建模。
-- 多任务并行前必须先通过独立性门控；不满足条件的任务串行执行，避免上下文、写入范围和验证路径互相干扰。
-- Solo Agent 不自建 recovered child session，也不在 provider overflow 后做会话迁移。
-- 本模块只负责在当前线程或任务运行边界内做预算评估、压缩和状态保活。
+当前有两层相关但职责不同的上下文能力：
 
-## 触发策略
+1. `solo_agent.context` 负责运行时上下文预算、压缩和任务状态保活。
+2. `workflow.intent_router` 负责生成 Context Plan，决定本轮应该收集哪些仓库证据。
 
-- 常规任务：成功压缩次数小于等于 2 时，使用 80% 上下文窗口阈值，并由主模型生成摘要。
-- 长任务：成功压缩次数超过 2 后，使用 50% 阈值，并优先用 Ollama `qwen3.5:4b` 作为 AuxiliaryClient 生成摘要。
-- 压缩只在 plan 前、respond 前、run 结束后触发，避免截断工具调用链。
+预算管理防止上下文溢出；Context Plan 决定应该收集什么证据。
 
-## 计数策略
+## Context Plan
 
-- 普通文本使用 `utf8_bytes / 4` 向上取整估算。
-- 代码文本优先使用 `tree-sitter` 和 `tree-sitter-language-pack` 解析叶子节点估算。
-- 未知语言、依赖不可用或解析失败时自动回退普通文本规则。
+意图路由会输出 `context_plan`，里面包含明确的上下文范围。常见范围包括：
 
-## TaskList 状态
+- workspace snapshot；
+- 路径读取；
+- 文本搜索；
+- 代码地图；
+- 符号搜索；
+- 引用和调用关系；
+- 影响分析；
+- 测试相关性；
+- Git 读取范围；
+- 记忆检索范围。
 
-- `TaskListState` 对齐 oh-my-openagent 的结构化任务思想，任务条目包含 `id`、`subject`、`description`、`status`、`activeForm`、`blockedBy`、`blocks`、`owner` 和 `metadata`。
-- planner prompt 要求输出 `<task-list-json>` 块，graph 优先解析结构化 JSON，只有缺失时才回退文本规则。
-- 压缩后会注入 `<task-state>`，并保留 `Continue from`，保证长期任务恢复到正确的下一步。
-- 工具层提供 `task_create`、`task_get`、`task_list`、`task_update`，为后续 Web 端任务面板和 LangGraph thread state 接入预留接口。
+每个范围可以包含原因、查询词、预期证据、fallback 和预算。`select_tools` 根据这些范围生成具体工具调用，因此后续阶段不需要重新猜测任务类型。
 
-## 目录提示与权限
+## 上下文预算保护
 
-- `SubdirectoryHintTracker` 根据工具参数中的路径加载工作区内目录提示文件，不改写 system prompt。
-- 压缩 agent 只调用 `ChatProvider.complete()`，不会获得工具注册表或执行权限。
+Graph 会在规划前和回复前执行 context guard。它会估算当前上下文压力，只在需要时触发压缩。
+
+当前策略：
+
+- 短任务使用较高阈值，避免过早压缩。
+- 长任务在多次压缩后切换到更严格阈值。
+- 压缩只使用模型完成能力，不给压缩模型工具权限。
+- 压缩失败会被记录，但不会自动破坏本轮运行。
+
+## 任务状态
+
+`TaskListState` 用来让结构化任务在 planning、compression、team mode 和工具调用之间保持稳定。它可以从结构化 plan 中解析，也可以通过 task 工具更新。
+
+有了任务状态，团队模式不需要完全依赖自然语言计划，而是可以读取明确的任务目录。
+
+## 目录提示
+
+`SubdirectoryHintTracker` 会根据工具参数里的路径加载工作区内的目录提示文件。目录提示只是上下文，不是新的用户指令，也不会改写 system prompt。
+
+## 缓存与去重
+
+运行中的 compact 结果会保存在 snapshots 中，例如 code map summary 和 impact analysis summary。后续阶段应该复用这些结果，避免重复扫描同一个仓库。
+
+只读上下文工具可以并发执行；写入工具、验证命令、补丁生成和审批相关操作仍然保持受控顺序。
+
+## 边界
+
+上下文管理不决定是否改文件。它只负责提供有边界的证据，供意图路由、工具选择、补丁和回复阶段使用。

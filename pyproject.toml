@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "solo-agent"
 version = "0.1.0"
-description = "Local-first personal programming assistant MVP with FastAPI, SSE, and a transparent Web UI."
+description = "Local-first Coding Agent Harness with intent routing, memory, skills, team subagents, verified editing, and evals."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

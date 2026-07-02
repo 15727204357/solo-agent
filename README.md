@@ -1,90 +1,161 @@
-# Solo Agent
+# Solo Agent V1
 
-Solo Agent 是一个 Python 生态的 Web 版团队工程自动化工作流 Runtime。它不是简单的聊天壳，而是一个可以写进简历的本地 Agent 工程系统：围绕可重复执行、可审计、可并行处理多个任务，提供可观测的执行流程、受控工具调用、graph 层行为策略、安全检查、Provider 抽象和 SQLite 持久化。
+Solo Agent V1 是一个本地优先的 Coding Agent Harness，用来把“让 AI 写代码”这件事变成一条可观察、可验证、可回放的工程链路。
 
-当前目标是做出一个能运行、能演示、能继续扩展，并能把团队工程任务真实受控执行起来的闭环：
+它不是简单聊天壳，也不是演示用工具选择器。用户在 Web 页面提交代码任务后，Solo Agent 会先判断任务意图，规划需要的上下文，选择受控工具，必要时生成补丁提案，运行验证，并把关键决策保存下来，方便审查、恢复和后续改进。
 
-团队成员在 Web 页面提交一个或多个工程任务，后端启动工作流运行，Agent 依次完成任务计划、独立性判断、上下文收集、安全检查、行为策略评估、受控工具调用、双轮审查、错误分类、流式回复和审计持久化。已知任务类型优先用代码定义，比让 LLM 临场决定控制流更可靠。
+## 项目定位
 
-## 核心能力
+当前 V1 关注的是 Coding Agent 的 harness 设计，而不是单纯模型调用：
 
-- `Web UI`：在浏览器里提交编程任务，并实时查看 Agent 执行进度。
-- `Workflow Loop`：按 `plan -> independence_gate -> context -> inspect -> tool_call -> review -> respond -> persist` 组织任务。
-- `计划层`：吸收 superpowers `writing-plans` 实践，计划无占位符、2-5 分钟粒度，并内联自审。
-- `并行门控`：只有满足 superpowers 的 4 条独立性条件时才并行处理任务，否则自动回到串行执行。
-- `双轮审查`：第一轮检查规范合规，第二轮检查代码质量，把审查作为工作流节点而不是事后提醒。
-- `错误处理`：使用本地 Hermes 风格 ErrorClassifier 做 4 类错误归因，按单次 run 累计相同异常历史，并结合本地 goose 风格 RepetitionInspector 识别重复工具调用。
-- `Provider 抽象`：支持 OpenAI-compatible API、DeepSeek 和 Ollama。
-- `SQLite 记忆层`：保存 session、run、message、tool_call、timing_point 和 snapshot。
-- `多轮 Session 记忆`：同一 session 的后续 run 会读取 recent messages、summary snapshot 和 FTS5 检索结果。
-- `Hermes 风格记忆周期`：调用前 `prefetch_all`，回复后 `sync_all`，后台 `queue_prefetch_all`，压缩前 `on_pre_compress`。
-- `记忆开关`：可按 run 控制是否保存/使用记忆，以及是否参考历史聊天记录。
-- `Fence 防御`：召回记忆通过 `<memory-context>` 注入，并声明它不是新的用户输入。
-- `行为策略层`：在 graph 中硬执行 Superpowers Iron Law、Karpathy 行为规则、read-before-edit、hash preview 和自动恢复。
-- `受控工具系统`：支持列文件、读文件、搜索文本、质量检查、hash 锚定编辑预览和受控写入，并限制在 workspace 根目录内。
-- `安全检查器`：拦截危险删除、密钥泄露、可疑出站访问和重复工具调用。
-- `SSE 流式事件`：前端可以看到规划、并行/串行决策、工具调用、审查、响应生成、持久化等中间过程。
-- `LangGraph 1.x 拓扑预留`：Python 侧优先使用 deer-flow/LangGraph 风格工作流；如果迁移到 Go 生态，选型可参考 eino 的类型安全工作流。
+- 面向真实仓库，而不是隔离的演示样例。
+- 面向开发闭环，而不是只返回一段回答。
+- 面向可审计执行，而不是让模型自由写文件。
+- 面向可持续改进，而不是每次都从零开始猜流程。
 
-更多项目背景和简历叙事见 [docs/PROJECT_BRIEF.md](docs/PROJECT_BRIEF.md)。
+一句话概括：Solo Agent V1 是一个本地运行的工程化 Coding Agent 运行时，核心价值在于意图路由、上下文管理、记忆系统、Skill 链路、团队子 Agent 编排和补丁审批闭环。
+
+## 项目亮点
+
+### 1. 统一意图路由
+
+Solo Agent 会在执行工具前先生成 route plan，明确本轮任务属于解释问题、检查代码、修改代码、调试测试、运行质量检查、代码审查还是 Skill 管理。
+
+route plan 会同时包含：
+
+- 用户意图和备选意图；
+- 需要收集的上下文范围；
+- 候选工具和已选工具；
+- Skill / Recipe 候选；
+- 审批边界和验证策略；
+- 风险摘要和决策痕迹；
+- 是否需要重路由。
+
+这样可以避免普通 Coding Agent 常见的“模型边聊边猜工具”。
+
+### 2. Context Plan 上下文管理
+
+上下文不是越多越好。Solo Agent 会先规划上下文，再决定读取文件、搜索文本、生成代码地图、做影响分析、查测试相关性、读取 Git 状态或召回记忆。
+
+这种设计让 Agent 能围绕证据工作：知道为什么搜索、期望找到什么、没找到时如何 fallback，减少无效检索和上下文污染。
+
+### 3. ReAct + Reflection 混合循环
+
+执行层采用 ReAct 思路：观察上下文、调用工具、读取结果、继续下一步。
+
+反馈层引入 Reflection 思路：测试失败、工具无结果、补丁被阻塞、上下文置信度不足时，可以触发有界重路由；team tester、supervisor、patch gate、route replay 和 eval harness 都会参与复盘。
+
+它不是“一次调用失败就结束”，而是有清楚边界的迭代式解决问题流程。
+
+### 4. 面向 Coding 的记忆系统
+
+Solo Agent 使用 SQLite + FTS5/BM25 做记忆检索，适合精确召回：
+
+- 文件路径；
+- 函数名和类名；
+- 报错信息；
+- 配置项；
+- 历史解决方案；
+- 用户偏好和项目事实。
+
+相比纯向量召回，FTS5 更适合 Coding 场景里大量精确 token、路径和错误文本的检索。长期记忆还带有候选、审批、冲突和撤销机制，避免错误信息静默污染记忆。
+
+### 5. Skill / Recipe 渐进披露
+
+Skill 不会一开始全部塞进 prompt。系统先用紧凑元数据做路由，只有命中后才加载完整 `SKILL.md`、Recipe 和支持文件。
+
+Recipe 会区分自动步骤、手动步骤、阻塞原因和审批边界。Skill evolution 可以把成功经验或反复出现的问题沉淀成 Skill/Recipe 变更提案，但不会绕过审批直接修改自身能力。
+
+### 6. 团队模式子 Agent 编排
+
+团队模式不是随意开多个 Agent。Solo Agent 使用固定的工程团队链路：
+
+```text
+team_plan -> parallelism_gate -> team_develop -> team_test -> team_supervisor
+```
+
+`parallelism_gate` 只负责判断开发任务是否适合拆分、拆成几个 developer。每个 developer 在独立 lightweight workspace 中工作，tester 负责验证，supervisor 负责审查并合并不冲突的 diff。
+
+主工作区不会被 developer 子 Agent 直接修改。
+
+### 7. Verified Editing 补丁审批闭环
+
+代码修改不会直接写入主工作区，而是进入：
+
+```text
+生成补丁提案 -> 审批边界 -> 应用补丁 -> 执行验证 -> 记录结果
+```
+
+这让 Agent 具备执行能力，同时保留用户对主仓库修改的控制权。
+
+### 8. Route Replay 与 Eval Harness
+
+每次运行都会保存关键事件和路由决策。后续可以回放 route epoch，检查当时为什么选了某个 intent、上下文范围和工具。
+
+Eval harness 支持断言 expected intent、required scopes、forbidden tools、approval required、expected reroute 等字段，为后续优化路由策略提供数据闭环。
+
+## 当前 V1 能力边界
+
+已经具备：
+
+- Web UI 和 SSE 事件流；
+- LangGraph `StateGraph` 主运行时；
+- OpenAI-compatible、DeepSeek、Ollama、fake provider；
+- 统一意图路由和 Route 面板状态；
+- Context Plan、上下文预算保护和压缩；
+- SQLite 持久化和 FTS5/BM25 记忆检索；
+- Python AST 代码智能、code map、影响分析、测试相关性；
+- Skill/Recipe 路由、策略和 evolution 提案；
+- team developer 隔离工作区，支持 Git worktree/overlay 和 copy fallback；
+- verified editing、patch proposal 和审批边界；
+- route replay 和 eval scoring；
+- 后端、前端回归测试。
+
+暂不宣称：
+
+- Docker / VM 级真实沙箱；
+- 完全自主自进化；
+- 任意子 Agent 拓扑；
+- 模型输出直接改主仓库；
+- 外部向量数据库依赖。
 
 ## 技术栈
 
-- 后端：FastAPI
-- 前端：Jinja2 + 原生 CSS/JS + Server-Sent Events
-- Agent 编排：LangGraph 1.x 风格状态流，并预留 TypedDict StateGraph 拓扑
-- 工作流选型：Python 优先 deer-flow/LangGraph 风格；Go 生态可参考 eino 类型安全工作流
-- 模型接入：OpenAI-compatible、DeepSeek、Ollama
-- 持久化：SQLite + SQLAlchemy Async + aiosqlite
-- 记忆检索：SQLite FTS5 sidecar index，中文短语带 LIKE 降级
-- 配置管理：pydantic-settings
-- 测试：pytest + pytest-asyncio
-- 代码质量：Ruff
-- 项目管理：uv
+- 后端：Python、FastAPI、LangGraph、SQLAlchemy Async、aiosqlite
+- 前端：React、TypeScript、Vite、Server-Sent Events
+- 记忆：SQLite、FTS5、BM25
+- 代码智能：Python AST、本地 SQLite 索引、FTS5/BM25 检索
+- 测试：pytest、pytest-asyncio、Ruff、Vitest
+- 项目管理：uv、npm
 
-## 项目结构
+## 快速开始
 
-当前目录按 Web 端团队工程自动化产品形态拆分，前后端边界更接近 DeerFlow 2.0 这类全栈 Agent 工作流项目：
+### 1. 克隆项目
 
-```text
-backend/
-  src/solo_agent/      # Python 后端、Agent runtime、API、Provider、Memory、Tools
-  tests/               # 后端测试
-frontend/
-  templates/           # Jinja2 页面模板
-  static/              # 原生 CSS/JS 静态资源
-docs/                  # 产品与工程文档
-skills/                # Agent skill/SOP
-data/                  # 本地运行数据
+```powershell
+git clone https://github.com/15727204357/solo-agent.git
+cd solo-agent
 ```
 
-## 本地运行
+### 2. 安装后端依赖
 
 推荐使用 `uv`：
 
 ```powershell
 uv sync --extra dev
-uv run solo-agent-web
 ```
 
-然后打开：
-
-```text
-http://127.0.0.1:8000
-```
-
-也可以使用传统虚拟环境：
+如果没有 `uv`，也可以使用虚拟环境：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-solo-agent-web
 ```
 
-## Provider 配置
+### 3. 配置模型 Provider
 
-默认使用 Ollama，适合本地演示：
+本地 Ollama 示例：
 
 ```powershell
 $env:SOLO_AGENT_PROVIDER="ollama"
@@ -92,105 +163,117 @@ $env:SOLO_AGENT_MODEL="llama3.1"
 $env:SOLO_AGENT_BASE_URL="http://localhost:11434"
 ```
 
-使用 OpenAI：
+OpenAI-compatible 示例：
 
 ```powershell
 $env:SOLO_AGENT_PROVIDER="openai"
 $env:SOLO_AGENT_MODEL="gpt-4.1-mini"
-$env:SOLO_AGENT_API_KEY="你的 API Key"
+$env:SOLO_AGENT_API_KEY="your-api-key"
 ```
 
-使用 DeepSeek：
+DeepSeek 示例：
 
 ```powershell
 $env:SOLO_AGENT_PROVIDER="deepseek"
 $env:SOLO_AGENT_MODEL="deepseek-chat"
-$env:SOLO_AGENT_API_KEY="你的 API Key"
+$env:SOLO_AGENT_API_KEY="your-api-key"
 ```
 
-也可以复制 `.env.example` 为 `.env`，统一管理环境变量。
+也可以复制 `.env.example` 为 `.env` 后统一配置。
 
-记忆开关：
+### 4. 启动后端
+
+```powershell
+uv run solo-agent-web
+```
+
+打开：
+
+```text
+http://127.0.0.1:8000
+```
+
+### 5. 前端开发模式
+
+如果需要单独开发前端：
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+## 常用配置
 
 ```powershell
 $env:SOLO_AGENT_MEMORY_ENABLED="true"
 $env:SOLO_AGENT_CONVERSATION_HISTORY_ENABLED="true"
+$env:SOLO_AGENT_INTENT_ROUTER_MODE="shadow_hybrid"
+$env:SOLO_AGENT_INTENT_ROUTER_MODEL_TIMEOUT_SECONDS="1.5"
+$env:SOLO_AGENT_SUBAGENT_ENABLED="false"
 ```
 
-## HTTP API
+说明：
 
-- `GET /`：打开 Web UI。
-- `GET /api/health`：健康检查。
-- `POST /api/sessions`：创建会话。
-- `GET /api/sessions`：获取会话列表。
-- `GET /api/sessions/{session_id}`：获取单个会话和运行记录。
-- `GET /api/sessions/{session_id}/messages`：获取当前 session 的多轮消息历史。
-- `POST /api/sessions/{session_id}/runs`：提交一次 Agent 运行。
-- `GET /api/sessions/{session_id}/runs/{run_id}/events`：通过 SSE 流式读取运行事件。
+- `SOLO_AGENT_INTENT_ROUTER_MODE=rules`：只使用规则路由，延迟最低。
+- `SOLO_AGENT_INTENT_ROUTER_MODE=shadow_hybrid`：默认推荐，模型建议只做影子记录，不直接改变执行。
+- `SOLO_AGENT_INTENT_ROUTER_MODE=hybrid`：允许模型建议参与排序，但仍不能绕过 guardrail。
+- `SOLO_AGENT_SUBAGENT_ENABLED=true`：允许 Plan Mode 进入团队子 Agent 链路。
 
-提交 run 时可以覆盖记忆开关：
+## 运行测试
 
-```json
-{
-  "prompt": "继续刚才的设计",
-  "memory_enabled": true,
-  "conversation_history_enabled": true
-}
-```
-
-## 测试
-
-运行测试：
+后端测试：
 
 ```powershell
 uv run --extra dev python -m pytest -q
 ```
 
-代码检查：
+后端代码检查：
 
 ```powershell
 uv run --extra dev ruff check .
 ```
 
-当前测试覆盖：
+前端测试和构建：
 
-- Provider 配置和工厂创建。
-- SQLite session、run、message、tool_call、timing_point、snapshot 写入。
-- 多轮消息历史、FTS5 session 内检索、summary snapshot。
-- Hermes memory lifecycle、`MEMORY.md` / `USER.md` 内置记忆、fence escape 防御。
-- 安全检查器和受控工具边界。
-- Agent 事件流完整执行。
-- Web API 创建会话、提交运行和读取 SSE。
+```powershell
+cd frontend
+npm test
+npm run build
+```
 
-## 这一版你能学到什么
+## 项目结构
 
-这一版适合作为“Agent 工程入门到团队工作流自动化”的第一阶段练习。你可以具体学到：
+```text
+backend/
+  src/solo_agent/      # 后端、Agent runtime、workflow、memory、tools、skills
+  tests/               # 后端单元测试和集成测试
+frontend/
+  src/                 # React/TypeScript 前端源码
+  templates/           # FastAPI 服务的 HTML 壳
+  static/              # 静态资源和构建产物
+docs/                  # 产品与架构文档
+skills/                # 工作区 Skill 和 Recipe
+data/                  # 本地运行数据
+```
 
-- 如何从零搭建一个 Python `backend/src` 分层项目，并用 `pyproject.toml`、`uv`、`ruff`、`pytest` 管理工程质量。
-- 如何用 FastAPI 设计 Web 后端，包括路由、依赖注入、后台任务、健康检查和 API 测试。
-- 如何用 Server-Sent Events 把 Agent 的中间过程流式推给前端，而不是只返回最终答案。
-- 如何设计一个团队工程 Workflow Loop，把规划、独立性判断、上下文、安全检查、工具调用、审查、回答和持久化拆成清晰阶段。
-- 如何把已知工程任务类型代码化，让 LLM 负责上下文理解和执行辅助，而不是负责所有流程决策。
-- 如何设计并行前提：只有任务互不依赖、写入范围不冲突、上下文足够独立、验证路径独立时才并行，否则串行。
-- 如何把双轮审查纳入运行时：先做规范合规审查，再做代码质量审查。
-- 如何用 ErrorClassifier 和 RepetitionInspector 区分可恢复错误、策略违规、环境问题和重复架构失败。
-- 如何跟进快速迭代的 Agent 技术栈，把 LangGraph/LangChain Core 升级到新的稳定主线并用测试兜底。
-- 如何做 Provider 抽象，让 OpenAI、DeepSeek、Ollama 走统一聊天接口。
-- 如何用 SQLAlchemy Async 和 SQLite 设计最小记忆层，保存可调试的运行历史。
-- 如何设计受控工具注册表，并把工具限制在 workspace 根目录内，避免越权读取或越权写入。
-- 如何做 deterministic safety checks，用规则先拦截危险删除、密钥泄露和不允许的工具调用。
-- 如何写不依赖真实模型网络调用的测试，用 fake provider 测 Agent 事件流。
-- 如何把一个简历项目讲成“工程系统”：可观测性、安全边界、持久化、Provider 抽象和后续扩展路线。
+## 文档入口
 
-## 后续路线
+- [工作流编排](docs/WORKFLOW_ORCHESTRATION.md)
+- [团队 Coding 工作流](docs/solo_agent_coding_workflow.md)
+- [并行门控](docs/workflow_parallelism.md)
+- [上下文管理](docs/context-management.md)
+- [工具与 Skill 生态](docs/tool_ecosystem.md)
+- [代码智能与恢复](docs/code_intelligence_recovery_workflow.md)
+- [项目说明](docs/PROJECT_BRIEF.md)
+- [记忆层](backend/src/solo_agent/memory/README.md)
 
-下一阶段可以继续做这些能力：
+## 适合如何使用
 
-- 接入真实代码编辑：hash anchor + Tree-sitter。
-- 完善团队任务工作流：任务类型注册、并行调度、依赖图和审计日志。
-- 增强双轮审查：规范合规检查、代码质量检查和自动修复建议。
-- 增加 FTS5 记忆检索和 `on_pre_compress` hook。
-- 引入 MCP 风格工具协议。
-- 做 fast/complete 双 Provider 路由和 fallback。
-- 加 checkpoint replay，让每次 Agent 运行可恢复、可复盘。
-- 优化 Web UI，把工具调用、TimingPoint、Snapshot 做成更直观的可视化面板。
+Solo Agent V1 适合用来：
+
+- 学习 Coding Agent Harness 的工程结构；
+- 研究意图路由、上下文规划和工具治理；
+- 实验本地记忆、Skill/Recipe 和 route eval；
+- 构建可审计的 AI 编码工作流；
+- 作为简历项目展示完整 Agent 工程闭环。

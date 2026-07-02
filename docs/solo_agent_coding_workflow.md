@@ -1,48 +1,76 @@
-# Solo Agent Coding Workflow
+﻿# Solo Agent 团队 Coding 工作流
 
-Solo Agent's team mode is a lightweight sandbox-aware coding workflow:
+本文档说明当前团队 Coding 路径。目标不是任意 Agent swarm，而是一套小而清楚的工程团队模式：明确角色、明确隔离、明确合并边界。
+
+## 团队链路
 
 ```text
-team_plan -> team_develop -> team_test -> team_supervisor
+team_plan -> parallelism_gate -> team_develop -> team_test -> team_supervisor
 ```
 
-## Runtime Shape
+角色分工：
 
-- `team_plan` turns the lead plan/task list into at most two developer assignments.
-- Code tasks first build a lightweight code map and impact summary so team mode
-  can pass affected files, symbols, related tests, and suggested verification
-  commands into the developer/tester loop.
-- `team_develop` runs a coding developer loop in the isolated command workspace when the provider supports tool calling.
-- The developer loop is limited to `read_file`, `search_code`, `prepare_edit`, `preview_patch`, `apply_text_edit`, `run_pytest`, `run_ruff_check`, and `git_diff`.
-- If the provider cannot call tools, team mode falls back to the existing JSON patch request path and applies that patch only inside the command workspace.
-- `team_test` reviews the sandbox diff plus pytest/ruff evidence and can send structured feedback back to the developer for one more fix pass.
-- `team_supervisor` reconstructs a verified patch proposal from the final sandbox files and leaves the main workspace unchanged until approval.
+- `planner`：把 lead plan 或任务状态整理成任务目录。
+- `parallelism_gate`：判断 developer 是否适合并行，以及应该拆成几个 developer assignment。
+- `developer`：只在自己的隔离工作区内修改代码。
+- `tester`：运行目标验证，并把失败转成结构化反馈。
+- `supervisor`：检查最终证据，把安全的 diff 转成 verified patch proposal。
 
-## Sandbox Boundary
+## 并行策略
 
-The current implementation is lightweight local isolation, not Docker isolation.
-For `sandbox_mode=isolated`, Solo Agent copies the workspace into
-`.solo-agent/sandboxes/<session>/<run>/workspace` and runs developer edits and
-allowed commands there. Command execution stays bounded by the local allowlist:
-tests, lint/build checks, and read-only git inspection.
+`parallelism_gate` 不是旧的 fan-out 分发器。在团队模式里，它只回答一个问题：这个计划应该由一个 developer 做，还是拆成多个 developer assignment？
 
-Because sandbox copies do not include `.git`, team-mode `git_diff` compares the
-main workspace baseline against the sandbox workspace directly. This gives the
-developer, tester, and supervisor a stable diff without writing to the main
-checkout.
+判断依据包括：
 
-## Approval Boundary
+- 问题领域是否独立；
+- 所需上下文是否独立；
+- 写入路径是否不冲突；
+- 验证命令是否独立；
+- `max_concurrent_subagents` 配置的 developer 数量上限。
 
-The supervisor does not trust a model-authored patch as the merge artifact. It
-rebuilds the patch request from the final sandbox file contents, then uses the
-normal verified editing service to produce a pending patch proposal. The main
-workspace is modified only after the user approves that proposal.
+如果不能证明安全拆分，就只生成一个 developer assignment。这不是失败，而是保守策略：仍然保留 tester 和 supervisor 的团队闭环，同时避免制造合并冲突。
 
-## Recovery Boundary
+## developer 工作区边界
 
-Long-running team work records graph snapshots plus sandbox artifacts:
-sandbox root, sandbox diff, tool ledger, pytest/ruff output, developer summary,
-code map summary, and impact analysis. User interrupt moves the run into
-`paused` or `awaiting_feedback` instead of throwing the work away. Resume can
-continue from `team_develop`, `team_test`, or `team_supervisor` with human
-feedback and recovery hints.
+developer 子 Agent 可以真实修改代码，但不能直接改主仓库。
+
+每个 developer assignment 都会准备一个轻量工作区：
+
+1. 如果命令工作区是 Git 仓库，优先使用 `git worktree add --detach`。
+2. 把命令工作区中的未提交本地状态增量 overlay 到 worktree。
+3. 如果 worktree 不可用，降级为复制工作区。
+4. developer 只拿到受限的 sandbox 工具注册表。
+5. 工具调用 ledger 和 diff 证据会交给 supervisor 审查。
+
+这不是 Docker 或虚拟机级别的沙箱，但对 V1 来说足够保证 developer 不直接写主工作区。
+
+## developer 工具循环
+
+如果 provider 支持 tool calling，`team_develop` 会用受限工具循环执行 developer assignment。允许的能力包括有边界的读文件、搜索、准备编辑、预览补丁、在 sandbox 中应用文本编辑、运行 pytest/ruff、查看 sandbox diff。
+
+如果 provider 不支持 tool calling，团队路径会降级为 JSON patch request，并且只把 patch 应用到隔离工作区。后续仍然要经过 tester 和 supervisor。
+
+## tester 反馈循环
+
+`team_test` 会执行 team plan 中的验证命令。如果没有显式命令，会使用 impact analysis 和 test relevance 给出的建议。验证失败时，tester 会生成结构化反馈，并在迭代预算内回到 `team_develop`。
+
+这个循环是有上限的 Reflection 步骤，不是无限重试。
+
+## supervisor 合并边界
+
+`team_supervisor` 不相信模型最后的自然语言总结就是可合并产物。它会从最终工作区内容和 developer diff 中重建编辑，检查 developer 之间是否修改了同一文件或同一区域，然后生成普通的 verified patch proposal。
+
+主工作区只有在正常审批通过后才会被修改。
+
+## 保留的证据
+
+团队运行可以保留：
+
+- team plan 和 assignments；
+- developer 工作区路径和 backend 类型，如 `worktree_overlay` 或 `copy`；
+- sandbox diff；
+- 工具调用 ledger；
+- pytest/ruff 输出；
+- tester report；
+- supervisor report；
+- patch proposal 元数据。

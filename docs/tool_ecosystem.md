@@ -1,114 +1,63 @@
-# Coding Agent Tool Ecosystem
+﻿# 工具与 Skill 生态
 
-Solo Agent's tool ecosystem is intentionally coding-agent-focused. It is not a
-general DeerFlow-style marketplace, browser automation suite, data-analysis
-platform, or SaaS connector hub. The supported surface is the minimum needed to
-inspect, edit, verify, and review real codebases with auditable safety
-boundaries.
+Solo Agent 的工具系统专注 Coding Agent 场景。它不是通用插件市场、浏览器自动化平台、数据分析平台或 SaaS 连接器集合。V1 支持的是检查、修改、验证、审查和沉淀代码工作流所需要的最小能力面。
 
-## Tool Tiers
+## 工具分层
 
-- Context: workspace snapshots, file discovery, bounded reads, code search, and
-  Python symbol inspection.
-- Editing: hash-anchored prepare/preview/apply operations plus guarded
-  create/move/delete filesystem tools.
-- Quality: structured no-shell programming commands for tests, lint, build,
-  typecheck, and formatting checks.
-- Git read: status, diff, show, and recent log inspection only.
-- Skill orchestration: compact skill index, full `skill_view`, declarative
-  recipe preview/run, and declared skill scripts.
-- Subagents: optional scoped read-only subtask execution when the graph's
-  parallelism gate proves independence.
+- 上下文工具：workspace snapshot、文件发现、受限读取、文本搜索、代码地图、符号搜索、引用、调用关系、影响分析、测试相关性。
+- 编辑工具：准备编辑、预览补丁、hash-aware apply、补丁提案和受控文件操作。
+- 质量工具：pytest、Ruff、build、typecheck、format check 等结构化命令。
+- Git 只读工具：status、diff、show、recent log。
+- 记忆工具：最近消息、摘要、内置记忆、路由决策和记忆治理。
+- Skill 编排：紧凑 Skill 索引、`skill_view`、Recipe、Recipe preview/run、声明式脚本。
+- 团队子 Agent：隔离工作区中的 developer assignment，以及 tester / supervisor 审查。
 
-High-risk actions such as edits, deletion, moving files, skill changes,
-install/publish/deploy commands, and write-like scripts remain proposal or
-approval gated.
+高风险动作，例如主工作区编辑、删除、移动文件、Skill 变更、写入型脚本、安装依赖、发布、部署和网络型命令，都必须通过提案或审批边界。
 
-## Skill Contract
+## Skill 渐进披露
 
-`SKILL.md` files may expose this contract through frontmatter, Hermes metadata,
-or conventional Markdown sections:
+Skill 不是一开始全部塞进 prompt，而是分阶段加载：
 
-- `required_tools`: tools the skill expects the agent to use.
-- `tool_strategy`: how tools should be selected and ordered.
-- `acceptance_criteria`: the verification bar for successful use.
-- `failure_recovery`: when to stop, recover, or ask for help.
-- `metadata.hermes.recipes`: declarative recipes for common workflows.
-- `metadata.hermes.scripts`: declared scripts for repeatable mechanical checks.
+1. 路由阶段只使用紧凑元数据。
+2. 显式 Skill 请求或高置信命中时，才加载完整 `SKILL.md`。
+3. Recipe 和支持文件只在选中的 Skill 需要时加载。
+4. 脚本只有在 metadata 声明且策略允许时才能执行。
 
-`skills_list` returns only compact routing metadata. `skill_view` returns the
-full contract, sanitized content, and available support files.
+这样可以减少 prompt 噪音，也降低无关 Skill 文本影响本轮任务的风险。
 
-## Hybrid Orchestration
+## Skill 合约
 
-The workflow injects a compact skill index by default. Explicit
-`/skill <name-or-slug>` requests are resolved during the skill context stage,
-before planning, so the planner can see the full skill SOP and recipe index.
-Non-explicit matches stay compact until the model or workflow has a reason to
-load more.
+`SKILL.md` 可以声明：
 
-Recipes and scripts never replace the model's feedback loop. They produce
-bounded tool results, which are fed back into the run for the model to interpret
-against the current codebase.
+- `required_tools`；
+- `tool_strategy`；
+- `acceptance_criteria`；
+- `failure_recovery`；
+- `metadata.hermes.recipes`；
+- `metadata.hermes.scripts`。
 
-## Local Environment Check
+路由器需要能解释 Skill 或 Recipe 为什么被选中、为什么降权、为什么阻断，或为什么只作为备选。
 
-Repository-level command wrappers such as `rtk` are treated as local developer
-environment requirements, not runtime tool capabilities. Before relying on such
-wrappers, verify that they are available on `PATH`; if they are missing, use the
-same bounded no-shell tool policy and report the limitation in verification
-notes.
+## Recipe 边界
 
-## Recipe And Script Boundary
+声明式 Recipe 可以自动执行低风险的 read、search、git-read、test、build、lint、check 步骤。手动步骤或高风险步骤会被报告为人工动作，不会绕过审批。
 
-Declarative recipes may automatically run read/search/git-read/test/build/lint
-and check steps. Manual or high-risk recipe steps are blocked and reported as
-manual work.
-
-Skill scripts are stricter:
-
-- They must be declared by the skill metadata.
-- The script file must stay inside the skill's `scripts/` directory.
-- Only Python scripts are supported.
-- Invocation uses structured argv without a shell.
-- Only `auto` scripts with `low` or `medium-safe` risk and read/quality/check
-  kind are executable.
-- Secret-like, shell-like, network-like, and write-like arguments are rejected.
-
-This keeps mechanical workflow helpers useful without creating a hidden general
-execution channel.
+Recipe policy 会拒绝不安全模板参数、疑似密钥、shell 元字符、缺少审批的写入步骤，以及引用未知工具的步骤。
 
 ## Skill Evolution
 
-Skill evolution is a postlude analysis loop, not an automatic self-modifying
-system. After the model has produced its final response, the workflow can scan
-the completed run for deterministic evidence that a skill should be improved:
-blocked recipe steps, successful safe tool sequences, or clear quality-check
-recovery patterns.
+Skill evolution 是运行结束后的 Reflection，不是自动自我修改系统。
 
-When confidence passes the configured threshold, the postlude creates one
-pending `SkillChangeProposal` at most. The proposal reuses the existing
-approval API and passes a promotion gate before it is stored. A promoted recipe
-must parse through the existing recipe schema and policy, and the proposal must
-include both the new `references/recipes/` file and a safe metadata patch that
-declares it in the target `SKILL.md`. If metadata cannot be patched safely, the
-candidate remains a snapshot instead of becoming a pending proposal.
+运行结束后，Solo Agent 可以分析确定性证据，例如阻塞的 Recipe 步骤、成功的安全工具序列、反复出现的恢复模式。当置信度超过阈值时，系统最多创建一个 pending `SkillChangeProposal`。
 
-Skill evolution does not add executable scripts, read secrets, summarize `.env`
-content, or apply changes without user approval.
+被提升的 Recipe 必须通过现有 schema 和 policy。提案必须包含安全操作，并且仍然需要审批后才能修改工作区 Skill。低置信发现只会保存在 snapshot 中。
 
-Low-confidence findings stay as run snapshots. Approved proposals are the only
-path from observed execution experience back into `skills/`.
+## 团队子 Agent 工具
 
-## Coverage Governance
+developer 子 Agent 只在隔离工作区中具备写入能力。它们拿到的工具注册表比 lead agent 更窄，并且会记录工具调用 ledger。supervisor 使用 ledger 和最终 diff 生成主工作区的 verified patch proposal。
 
-Skill coverage is checked through a development-only audit loop. It scans
-workspace skills, validates contract fields, recipe declarations, recipe schema,
-recipe policy, required tools, orphan recipes, and undeclared scripts. The first
-coverage matrix is intentionally coding-agent-focused: Python backend changes,
-test-failure debugging, code review, hash-anchored editing, and bounded tool use.
+这让团队模式拥有真实执行能力，同时避免主仓库被不受控写入。
 
-The coverage report is not a product UI and does not add a new runtime approval
-path. It is a regression harness for answering whether common coding-agent
-workflows are actually represented by skills and recipes, or whether the model
-would still need to rediscover the same procedure from scratch.
+## 本地环境检查
+
+仓库里的本地包装命令，例如 `rtk`，只能看作开发者环境里的可选便利工具，不是运行时必备能力。如果包装命令不存在，就使用有边界的内置命令，并在验证说明里报告限制。

@@ -1,43 +1,59 @@
-# Workflow Parallelism Gate
+﻿# 并行门控
 
-The old parallelism gate is now a legacy diagnostic helper, not the primary
-subagent orchestration path.
+`parallelism_gate` 当前是团队 developer 编排门控。它的职责是判断一个计划应该由一个 developer 完成，还是拆成多个 developer assignment。
 
-## Current Product Rule
+它不是产品主链路里的任意子 Agent fan-out。
 
-Multi-agent execution is enabled only when both conditions are true:
+## 当前产品规则
+
+团队模式只在两个条件同时满足时启动：
 
 - `run_mode=plan`
 - `subagent_enabled=true`
 
-When enabled, the graph follows the fixed team workflow:
+当前主链路是：
 
 ```text
-team_plan -> team_develop -> team_test -> team_supervisor
+team_plan -> parallelism_gate -> team_develop -> team_test -> team_supervisor
 ```
 
-The previous `parallelism_gate -> parallel_dispatch -> wait_subagents` path is
-kept for internal experiments and regression tests, but the main graph does not
-route through it.
+下面这条旧链路不是产品路径：
 
-## Legacy Gate Semantics
+```text
+parallelism_gate -> parallel_dispatch -> wait_subagents -> supervisor_review
+```
 
-The helper still evaluates whether structured task metadata is safe to split:
+这些旧节点仍然注册在图里，用于兼容测试和内部诊断。
 
-- problem-domain independence;
-- context independence;
-- write-set independence;
-- verification independence.
+## 门控决策
 
-This remains useful as a diagnostic signal, but the resume-project demo favors
-the stable team workflow over arbitrary model-selected subagent topology.
+门控读取结构化团队任务，输出 developer assignment 元数据。只有在以下维度足够独立时才拆分：
 
-## Team Workflow Events
+- 问题领域；
+- 所需上下文；
+- 写入路径；
+- 验证命令。
 
-The active team path emits:
+如果拆分不安全，就输出一个 developer assignment。失败时保守退回一个 developer 是刻意设计：保留 tester / supervisor 闭环，同时避免并行冲突。
+
+## 为什么保留这个门控
+
+developer 并行是资源和风险决策，不只是工具执行决策。门控能保证：
+
+- 不会多个 developer 暗中写同一个主工作区；
+- 不让模型临时决定任意拓扑；
+- developer 数量有显式预算；
+- supervisor 能拿到清楚的 assignment 元数据；
+- 无法证明独立时有确定性降级策略。
+
+## 事件
+
+当前团队路径会发出：
 
 - `team_plan_started`
 - `team_plan_completed`
+- `parallelism_gate_started`
+- `parallelism_gate_completed`
 - `team_developer_started`
 - `team_developer_completed`
 - `team_tester_started`
@@ -46,10 +62,3 @@ The active team path emits:
 - `team_supervisor_completed`
 - `patch_proposed`
 - `patch_approval_required`
-
-## Scope
-
-Developer subagents can produce real code changes, but only inside the isolated
-command workspace. The supervisor converts the final sandbox result into the
-existing verified editing patch proposal for the main workspace, so applying
-changes still requires explicit approval.
