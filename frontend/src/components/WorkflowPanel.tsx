@@ -1,7 +1,7 @@
 import { ChevronDown, Clipboard, PanelRightClose, PanelRightOpen, Search } from "lucide-react";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
-import type { AgentEvent, RunViewState, TaskListItem } from "../types";
+import type { AgentEvent, IntentRoutePlanView, PatchProposalView, RunViewState, TaskListItem } from "../types";
 
 type WorkflowPanelProps = {
   state: RunViewState;
@@ -9,7 +9,7 @@ type WorkflowPanelProps = {
   onToggleCollapsed: () => void;
 };
 
-const tabs = ["Plan", "Tools", "Subagents", "Parallelism", "Raw Events"] as const;
+const tabs = ["Plan", "Route", "Patch Gate", "Tools", "Subagents", "Parallelism", "Raw Events"] as const;
 type Tab = (typeof tabs)[number];
 
 export function WorkflowPanel({ state, collapsed, onToggleCollapsed }: WorkflowPanelProps) {
@@ -67,6 +67,8 @@ export function WorkflowPanel({ state, collapsed, onToggleCollapsed }: WorkflowP
 
       <div className="min-h-0 flex-1 overflow-auto p-4">
         {activeTab === "Plan" && <PlanPanel state={state} />}
+        {activeTab === "Route" && <RoutePanel route={state.intentRoute} history={state.routeHistory} rerouteRequests={state.routeRerouteRequests} />}
+        {activeTab === "Patch Gate" && <PatchGatePanel proposal={state.patchProposal} />}
         {activeTab === "Tools" && <ToolsPanel state={state} />}
         {activeTab === "Subagents" && <SubagentsPanel state={state} />}
         {activeTab === "Parallelism" && <ParallelismPanel state={state} />}
@@ -107,6 +109,73 @@ function PlanPanel({ state }: { state: RunViewState }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function RoutePanel({
+  route,
+  history,
+  rerouteRequests,
+}: {
+  route: IntentRoutePlanView | null;
+  history: IntentRoutePlanView[];
+  rerouteRequests: unknown[];
+}) {
+  if (!route) {
+    return <EmptyState text="Waiting for intent_route_completed event" />;
+  }
+  const scopes = asArray(route.searched_scopes);
+  const contextScopes = recordArray(route.context_plan, "scopes");
+  const selectedTools = recordArray(route.tool_plan, "selected_tools");
+  const rejectedTools = recordArray(route.tool_plan, "rejected_tools");
+  const tools = selectedTools.length ? selectedTools : asArray(route.tool_candidates);
+  const skills = recordArray(route.skill_plan, "candidates").length ? recordArray(route.skill_plan, "candidates") : asArray(route.skill_candidates);
+  const recipes = recordArray(route.recipe_plan, "candidates").length ? recordArray(route.recipe_plan, "candidates") : asArray(route.recipe_candidates);
+  const alternatives = asArray(route.intent_alternatives);
+  const decisionTrace = asArray(route.decision_trace);
+  const rerouteTriggers = asArray(route.reroute_triggers);
+  const actions = asArray(route.next_actions);
+  const risk = route.risk_summary || {};
+  const approval = route.approval_plan || {};
+  const advisor = route.model_advisor || {};
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-950">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-slate-900 dark:text-slate-100">{String(route.intent || "unknown")}</h3>
+            <p className="mt-1 text-xs text-slate-500">{String(risk.boundary || approval.approval_boundary || "No routing boundary recorded")}</p>
+            <p className="mt-1 font-mono text-[11px] text-slate-400">
+              {String(route.route_plan_schema_version || "v1")} · epoch {String(route.route_epoch ?? 0)} · {String(route.route_id || "route")}
+            </p>
+          </div>
+          <span className="status-chip">{formatConfidence(route.confidence)}</span>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        <Metric label="context_scopes" value={String(contextScopes.length || scopes.length)} />
+        <Metric label="tools" value={String(tools.length)} />
+        <Metric label="skills" value={String(skills.length)} />
+        <Metric label="recipes" value={String(recipes.length)} />
+        <Metric label="alternatives" value={String(alternatives.length)} />
+        <Metric label="reroutes" value={String(Math.max(0, history.length - 1) + rerouteRequests.length)} />
+        <Metric label="max_risk" value={String(risk.max_risk_level || "-")} />
+        <Metric label="approval" value={String(Boolean(risk.requires_approval || approval.requires_approval))} />
+      </div>
+      {alternatives.length ? <CandidateList title="intent alternatives" candidates={alternatives} /> : null}
+      {contextScopes.length ? <CandidateList title="context plan" candidates={contextScopes} /> : <ChipList title="searched scopes" items={scopes} />}
+      <CandidateList title="tool candidates" candidates={tools} />
+      {rejectedTools.length ? <CandidateList title="rejected tools" candidates={rejectedTools} /> : null}
+      {skills.length ? <CandidateList title="skill candidates" candidates={skills} /> : null}
+      {recipes.length ? <CandidateList title="recipe candidates" candidates={recipes} /> : null}
+      {decisionTrace.length ? <CandidateList title="decision trace" candidates={decisionTrace} /> : null}
+      {rerouteTriggers.length ? <CandidateList title="reroute triggers" candidates={rerouteTriggers} /> : null}
+      {history.length > 1 ? <CandidateList title="reroute history" candidates={history.map((item) => ({ route_epoch: item.route_epoch, intent: item.intent, confidence: item.confidence, route_id: item.route_id }))} /> : null}
+      {rerouteRequests.length ? <JsonDetails title="reroute requests" value={rerouteRequests} /> : null}
+      <ChipList title="next actions" items={actions} />
+      {Object.keys(advisor).length ? <JsonDetails title="model advisor" value={advisor} /> : null}
+      <JsonDetails title="route JSON" value={route} />
     </div>
   );
 }
@@ -164,6 +233,69 @@ function ParallelismPanel({ state }: { state: RunViewState }) {
       </div>
       <JsonDetails title="candidates" value={decision.candidates || []} />
       <JsonDetails title="decision JSON" value={decision} />
+    </div>
+  );
+}
+
+function PatchGatePanel({ proposal }: { proposal: PatchProposalView | null }) {
+  if (!proposal) {
+    return <EmptyState text="Waiting for a patch approval event" />;
+  }
+  const plan = proposal.verification_plan || {};
+  const gate = proposal.stop_gate || {};
+  const commands = Array.isArray(plan.commands) ? plan.commands : [];
+  const missingEvidence = Array.isArray(gate.missing_evidence) ? gate.missing_evidence : [];
+  const status = String(gate.status || "missing");
+  const approvalReady = Boolean(gate.approval_ready);
+  const statusClass =
+    status === "passed"
+      ? "chip-success"
+      : status === "failed"
+        ? "chip-danger"
+        : status === "waived"
+          ? "chip-warn"
+          : "chip-warn";
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-950">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-slate-900 dark:text-slate-100">{proposal.summary || proposal.id || "Patch proposal"}</h3>
+            <p className="mt-1 text-xs text-slate-500">{String(gate.reason || plan.reason || "No gate reason recorded")}</p>
+          </div>
+          <span className={`status-chip ${statusClass}`}>{status}</span>
+        </div>
+        {!approvalReady ? (
+          <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+            Gate is not approval-ready. Run the planned verification or record an explicit waiver.
+          </p>
+        ) : null}
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        <Metric label="approval_ready" value={String(approvalReady)} />
+        <Metric label="required" value={String(plan.required ?? true)} />
+        <Metric label="commands" value={String(commands.length)} />
+        <Metric label="patch_status" value={String(proposal.status || "-")} />
+      </div>
+      <div className="space-y-2">
+        {commands.length ? (
+          commands.map((command, index) => (
+            <article key={`${command.command || "command"}-${index}`} className="rounded-md border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-950">
+              <div className="flex items-start justify-between gap-3">
+                <code className="break-words text-xs text-slate-800 dark:text-slate-100">{String(command.command || command.tool || "verification")}</code>
+                <span className="status-chip">{String(command.tool || "command")}</span>
+              </div>
+              {command.target ? <p className="mt-2 text-xs text-slate-500">target: {String(command.target)}</p> : null}
+              {command.purpose ? <p className="mt-1 text-xs text-slate-500">{String(command.purpose)}</p> : null}
+            </article>
+          ))
+        ) : (
+          <EmptyState text="No verification command is required for this patch" />
+        )}
+      </div>
+      {missingEvidence.length ? <JsonDetails title="missing evidence" value={missingEvidence} /> : null}
+      <JsonDetails title="patch gate JSON" value={{ verification_plan: plan, stop_gate: gate, verification: proposal.verification || null }} />
     </div>
   );
 }
@@ -265,6 +397,55 @@ function RawEventsPanel({ events, typeFilter, nodeFilter, search, onTypeFilter, 
   );
 }
 
+function ChipList({ title, items }: { title: string; items: unknown[] }) {
+  if (!items.length) {
+    return <EmptyState text={`No ${title} recorded`} />;
+  }
+  return (
+    <div>
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
+      <div className="flex flex-wrap gap-2">
+        {items.map((item, index) => (
+          <span key={`${String(item)}-${index}`} className="status-chip">
+            {String(item)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CandidateList({ title, candidates }: { title: string; candidates: unknown[] }) {
+  if (!candidates.length) {
+    return <EmptyState text={`No ${title} recorded`} />;
+  }
+  return (
+    <div className="space-y-2">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
+      {candidates.map((candidate, index) => {
+        const item = isRecord(candidate) ? candidate : { value: candidate };
+        return (
+          <article key={`${String(item.name || item.id || item.value || title)}-${index}`} className="rounded-md border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-950">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h4 className="font-mono text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  {String(item.name || item.id || item.value || "candidate")}
+                </h4>
+                {item.reason || item.recommendation_reason ? (
+                  <p className="mt-1 text-xs text-slate-500">{String(item.reason || item.recommendation_reason)}</p>
+                ) : null}
+              </div>
+              <span className="status-chip">{String(item.risk_level || item.category || item.run_policy || "-")}</span>
+            </div>
+            {item.confidence ? <p className="mt-2 text-xs text-slate-500">confidence: {formatConfidence(item.confidence)}</p> : null}
+            <JsonDetails title="candidate JSON" value={item} />
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function JsonDetails({ title, value }: { title: string; value: unknown }) {
   return (
     <details className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs dark:border-slate-800 dark:bg-slate-900/60">
@@ -322,4 +503,24 @@ function subagentModeLabel(metadata?: Record<string, unknown>) {
     return "只读证据收集";
   }
   return mode;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function recordArray(value: unknown, key: string): unknown[] {
+  return isRecord(value) ? asArray(value[key]) : [];
+}
+
+function formatConfidence(value: unknown): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "-";
+  }
+  return `${Math.round(numeric * 100)}%`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

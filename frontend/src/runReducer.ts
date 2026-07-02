@@ -1,6 +1,8 @@
 import type {
   AgentEvent,
+  IntentRoutePlanView,
   ParallelismDecision,
+  PatchProposalView,
   RunViewState,
   SubagentTaskView,
   TaskListItem,
@@ -16,7 +18,11 @@ export const initialRunViewState: RunViewState = {
   taskCount: 0,
   activeTask: null,
   planMode: false,
+  intentRoute: null,
+  routeHistory: [],
+  routeRerouteRequests: [],
   parallelismDecision: null,
+  patchProposal: null,
   toolCalls: [],
   subagentTasks: [],
   rawEvents: [],
@@ -75,6 +81,26 @@ export function runEventReducer(state: RunViewState, action: RunReducerAction): 
 
   if (event.type === "parallelism_decision_completed") {
     next = { ...next, parallelismDecision: data as ParallelismDecision };
+  }
+
+  if (event.type === "intent_route_completed" || event.type === "intent_route_reroute_completed") {
+    const route = data as IntentRoutePlanView;
+    next = { ...next, intentRoute: route, routeHistory: upsertRouteHistory(next.routeHistory, route) };
+  }
+
+  if (event.type === "intent_route_reroute_requested") {
+    next = { ...next, routeRerouteRequests: [...next.routeRerouteRequests, data] };
+  }
+
+  if (event.type === "patch_approval_required" || event.type === "patch_proposed") {
+    const patchProposal = toPatchProposal(data);
+    if (patchProposal) {
+      next = { ...next, status: "awaiting_approval", patchProposal };
+    }
+  }
+
+  if (event.type === "verification_completed") {
+    next = { ...next, patchProposal: mergePatchVerification(next.patchProposal, data) };
   }
 
   if (event.type === "tool_call_started") {
@@ -196,6 +222,45 @@ function upsertSubagentTask(tasks: SubagentTaskView[], task: SubagentTaskView): 
     return tasks.map((item, index) => (index === existing ? { ...item, ...task } : item));
   }
   return [...tasks, task];
+}
+
+function upsertRouteHistory(routes: IntentRoutePlanView[], route: IntentRoutePlanView): IntentRoutePlanView[] {
+  const routeId = typeof route.route_id === "string" ? route.route_id : "";
+  const epoch = Number(route.route_epoch ?? routes.length);
+  const existing = routes.findIndex((item) => {
+    if (routeId && item.route_id === routeId) {
+      return true;
+    }
+    return Number(item.route_epoch ?? -1) === epoch;
+  });
+  if (existing >= 0) {
+    return routes.map((item, index) => (index === existing ? { ...item, ...route } : item));
+  }
+  return [...routes, route];
+}
+
+function toPatchProposal(data: Record<string, unknown>): PatchProposalView | null {
+  if (!data.id && !data.patch_id && !data.stop_gate && !data.verification_plan) {
+    return null;
+  }
+  return data as PatchProposalView;
+}
+
+function mergePatchVerification(
+  current: PatchProposalView | null,
+  data: Record<string, unknown>,
+): PatchProposalView | null {
+  const patchId = typeof data.patch_id === "string" ? data.patch_id : undefined;
+  const base: PatchProposalView = current || (patchId ? { id: patchId } : {});
+  if (!current && !patchId) {
+    return null;
+  }
+  return {
+    ...base,
+    id: base.id || patchId,
+    verification: isRecord(data.verification) ? data.verification : base.verification,
+    stop_gate: isRecord(data.stop_gate) ? data.stop_gate : base.stop_gate,
+  };
 }
 
 function numeric(value: unknown, fallback: number): number {

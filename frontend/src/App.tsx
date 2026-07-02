@@ -51,7 +51,10 @@ const sseEventNames = [
   "failed",
   "error",
   "cancelled",
+  "patch_proposed",
   "patch_approval_required",
+  "verification_started",
+  "verification_completed",
 ];
 
 const defaultComposer: ComposerSettings = {

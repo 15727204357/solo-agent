@@ -206,6 +206,10 @@ body[data-theme="dark"] {
     @apply bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200;
   }
 
+  .chip-success {
+    @apply bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200;
+  }
+
   .tab-button {
     @apply shrink-0 rounded-md px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-900 dark:hover:text-slate-100;
   }

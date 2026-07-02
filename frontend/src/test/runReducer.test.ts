@@ -83,6 +83,90 @@ describe("runEventReducer", () => {
     expect(state.parallelismDecision?.subagent_enabled).toBe(false);
   });
 
+  it("handles intent_route_completed and keeps it across later events", () => {
+    const state = apply([
+      {
+        type: "intent_route_completed",
+        payload: {
+          data: {
+            intent: "modify_code",
+            confidence: 0.82,
+            searched_scopes: ["workspace", "code_index"],
+            tool_candidates: [{ name: "code_map", reason: "Code task needs a repository map." }],
+            risk_summary: { max_risk_level: "low", requires_approval: false },
+          },
+        },
+      },
+      {
+        type: "tool_call_started",
+        run_id: "run_1",
+        payload: {
+          data: {
+            name: "code_map",
+            arguments: { path: "." },
+            index: 1,
+          },
+        },
+      },
+    ]);
+
+    expect(state.intentRoute?.intent).toBe("modify_code");
+    expect(state.intentRoute?.searched_scopes).toEqual(["workspace", "code_index"]);
+    expect(state.routeHistory).toHaveLength(1);
+    expect(state.toolCalls[0].name).toBe("code_map");
+  });
+
+  it("stores reroute history without later tool events overwriting the route", () => {
+    const state = apply([
+      {
+        type: "intent_route_completed",
+        payload: {
+          data: {
+            route_id: "session:run:route:0",
+            route_epoch: 0,
+            intent: "inspect_code",
+            searched_scopes: ["workspace"],
+          },
+        },
+      },
+      {
+        type: "intent_route_reroute_requested",
+        payload: {
+          data: {
+            route_epoch: 1,
+            triggers: [{ kind: "tool_no_results" }],
+          },
+        },
+      },
+      {
+        type: "intent_route_reroute_completed",
+        payload: {
+          data: {
+            route_id: "session:run:route:1",
+            route_epoch: 1,
+            intent: "inspect_code",
+            searched_scopes: ["workspace", "code_index"],
+          },
+        },
+      },
+      {
+        type: "tool_call_completed",
+        run_id: "run_1",
+        payload: {
+          data: {
+            name: "code_map",
+            result: { files: ["app.py"] },
+          },
+        },
+      },
+    ]);
+
+    expect(state.intentRoute?.route_epoch).toBe(1);
+    expect(state.intentRoute?.searched_scopes).toEqual(["workspace", "code_index"]);
+    expect(state.routeHistory).toHaveLength(2);
+    expect(state.routeRerouteRequests).toHaveLength(1);
+  });
+
   it("handles task_started task_completed and task_failed", () => {
     const completed = apply([
       {
@@ -180,6 +264,45 @@ describe("runEventReducer", () => {
 
     expect(state.subagentTasks[0].status).toBe("blocked");
     expect(state.subagentTasks[0].reason).toBe("parallelism_gate_not_suitable");
+  });
+
+  it("tracks patch verification plan and stop gate", () => {
+    const state = apply([
+      {
+        type: "patch_approval_required",
+        payload: {
+          data: {
+            id: "patch_1",
+            status: "pending",
+            summary: "Fix bug",
+            verification_plan: {
+              required: true,
+              commands: [{ command: "pytest -q tests/test_app.py", tool: "targeted_pytest", target: "tests/test_app.py" }],
+            },
+            stop_gate: {
+              status: "missing",
+              approval_ready: false,
+              missing_evidence: ["Passing result for: pytest -q tests/test_app.py"],
+            },
+          },
+        },
+      },
+      {
+        type: "verification_completed",
+        payload: {
+          data: {
+            patch_id: "patch_1",
+            verification: { ok: true },
+            stop_gate: { status: "passed", approval_ready: true, reason: "All planned verification commands passed." },
+          },
+        },
+      },
+    ]);
+
+    expect(state.status).toBe("awaiting_approval");
+    expect(state.patchProposal?.verification_plan?.commands?.[0].tool).toBe("targeted_pytest");
+    expect(state.patchProposal?.stop_gate?.status).toBe("passed");
+    expect(state.patchProposal?.stop_gate?.approval_ready).toBe(true);
   });
 
   it("caps raw events at 300", () => {
